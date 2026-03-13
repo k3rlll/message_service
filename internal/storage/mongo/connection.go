@@ -4,37 +4,51 @@ import (
 	"context"
 	"fmt"
 	"main/internal/configs"
+	"time"
 
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-func Connect(cfg *configs.Config) (*mongo.Client, error) {
-	// Set up MongoDB client options with authentication
-	credentials := options.Credential{
-		AuthMechanism: cfg.Mongo.AuthMechanism,
-		Username:      cfg.Mongo.Username,
-		Password:      cfg.Mongo.Password,
-	}
+func ConnectMongoDB(ctx context.Context, cfg *configs.Config) (*mongo.Client, error) {
+
 	//
 
 	//
-	//options for MongoDB client connection, including authentication and connection timeout
-	//could be extended with additional options like TLS settings, replica set configuration, etc.
-	opt := options.ClientOptions{
-		Auth:           &credentials,
-		ConnectTimeout: &cfg.Mongo.ConnectTimeout,
-	}
 	//
+	// Set up MongoDB client options
+	clientOptions := options.Client().ApplyURI(cfg.Mongo.URI).
+		SetConnectTimeout(cfg.Mongo.ConnectTimeout).
+		SetServerSelectionTimeout(5 * time.Second).
+		SetMaxPoolSize(50).
+		SetMinPoolSize(10).
+		SetMaxConnIdleTime(5 * time.Minute)
 	//
 
 	//
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Mongo.ConnectTimeout)
-	defer cancel()
-	client, err := mongo.Connect(ctx, opt.ApplyURI(cfg.Mongo.URI))
+	clientOptions = &options.ClientOptions{
+		// Set up MongoDB client options with authentication
+		Auth: &options.Credential{
+			AuthMechanism: cfg.Mongo.AuthMechanism,
+			Username:      cfg.Mongo.Username,
+			Password:      cfg.Mongo.Password,
+		},
+	}
+
+	//
+
+	//
+
+	//
+	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
-		fmt.Println("Error connecting to MongoDB:", err)
-		return nil, err
+		return nil, fmt.Errorf("Error connecting to MongoDB: %w", err)
 	}
+	//since connect does not gurantee that the connection is established,
+	// we need to ping the database to check if the physical connection is successful
+	if err := client.Ping(ctx, nil); err != nil {
+		return nil, fmt.Errorf("Error pinging MongoDB: %w", err)
+	}
+
 	return client, nil
 }

@@ -13,11 +13,12 @@ type Config struct {
 	Mongo       Mongo  `yaml:"mongo"`
 }
 type Mongo struct {
-	URI            string        `env:"MONGO_URI" env-required:"true"`
-	ConnectTimeout time.Duration `env:"MONGO_CONNECT_TIMEOUT" env-default:"10s"`
-	AuthMechanism  string        `env:"MONGO_AUTH_MECHANISM" env-required:"true"`
-	Username       string        `env:"MONGO_USERNAME" env-required:"true"`
-	Password       string        `env:"MONGO_PASSWORD" env-required:"true"`
+	InitializationTimeout time.Duration `env:"MONGO_INITIALIZATION_TIMEOUT" env-default:"30s"`
+	URI                   string        `env:"MONGO_URI" env-required:"true"`
+	ConnectTimeout        time.Duration `env:"MONGO_CONNECT_TIMEOUT" env-default:"10s"`
+	AuthMechanism         string        `env:"MONGO_AUTH_MECHANISM" env-required:"true"`
+	Username              string        `env:"MONGO_USERNAME" env-required:"true"`
+	Password              string        `env:"MONGO_PASSWORD" env-required:"true"`
 }
 
 var (

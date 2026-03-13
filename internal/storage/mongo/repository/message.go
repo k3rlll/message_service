@@ -2,7 +2,6 @@ package repository
 
 import "main/internal/domain"
 
-func (r *Repository) SaveMessage(msg *domain.Message) error {
-	r.
-}
+func (r *MessageRepository) SaveMessage(msg *domain.Message) error {
 
+}
