@@ -52,3 +52,8 @@ func ConnectMongoDB(ctx context.Context, cfg *configs.Config) (*mongo.Client, er
 
 	return client, nil
 }
+
+func EnsureIndexes() error {
+	
+
+}
