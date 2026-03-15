@@ -26,13 +26,18 @@ func NewMessageRepository(db *mongo.Database) *MessageRepository {
 func (r *MessageRepository) EnsureIndexes(ctx context.Context) error {
 	//create unique indexes
 	indexModel := mongo.IndexModel{
-		Keys:    bson.D{{Key: "email", Value: 1}},
-		Options: options.Index().SetUnique(true),
+		Keys: bson.D{
+			{Key: "chat_id", Value: 1},
+			{Key: "content", Value: "text"},
+		},
+		Options: options.Index().SetPartialFilterExpression(
+			bson.D{{Key: "type", Value: "text"}},
+		),
 	}
 
 	_, err := r.col.Indexes().CreateOne(ctx, indexModel)
 	if err != nil {
-		return fmt.Errorf("failed to create indexes for users collection: %w", err)
+		return fmt.Errorf("failed to create indexes for messages collection: %w", err)
 	}
 	return nil
 }
