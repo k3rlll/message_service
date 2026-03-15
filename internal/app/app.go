@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	config "main/internal/configs"
 	handler "main/internal/handler/http"
+	uc "main/internal/usecase"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
@@ -19,7 +20,7 @@ func (cv *CustomValidator) Validate(i interface{}) error {
 	return cv.validator.Struct(i)
 }
 
-func Run(cfg config.Config, logger *slog.Logger) *echo.Echo {
+func Run(cfg config.Config, logger *slog.Logger, usecase *uc.Usecase) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.Validator = &CustomValidator{validator: validator.New()}
@@ -67,7 +68,7 @@ func Run(cfg config.Config, logger *slog.Logger) *echo.Echo {
 		},
 	}))
 
-	handler := handler.NewHandler(e)
+	handler := handler.NewHandler(e, usecase)
 	MapRoutes(e, handler)
 
 	return e

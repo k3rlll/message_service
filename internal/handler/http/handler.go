@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
-	"github.com/oklog/ulid/v2"
 )
 
 type Usecase interface {
@@ -21,20 +20,20 @@ type Usecase interface {
 
 	ListMessages(
 		ctx context.Context,
-		chatID ulid.ULID,
-		anchor ulid.ULID,
+		chatID string,
+		anchor string,
 		limit int64) ([]models.Message, bool, error)
 	//
 
-	DeleteMessage(ctx context.Context, chatID ulid.ULID, messageID ulid.ULID) error
+	DeleteMessage(ctx context.Context, chatID string, messageID []string) error
 
 	//
 
-	UpdateMessage(ctx context.Context, chatID ulid.ULID, messageID ulid.ULID, content string) error
+	UpdateMessage(ctx context.Context, chatID string, messageID string, content string) error
 
 	//
 
-	GetMessageByText(ctx context.Context, chatID ulid.ULID, text string) error
+	GetMessageByText(ctx context.Context, chatID string, text string, anchorID string) ([]models.Message, error)
 }
 
 type Handler struct {
@@ -50,18 +49,18 @@ func NewHandler(echo *echo.Echo, usecase Usecase) *Handler {
 }
 
 // MessageRequest represents the payload for creating a new message. DTO.
-type MessageRequest struct {
-	ChatID   string         `json:"chat_id" validate:"required"`
-	SenderID string         `json:"sender_id" validate:"required"`
+type SaveMessageRequest struct {
+	ChatID   string         `json:"chat_id" validate:"required,ulid"`
+	SenderID string         `json:"sender_id" validate:"required,ulid"`
 	Type     string         `json:"type" validate:"required,oneof=text image video audio system"`
 	Content  string         `json:"content" validate:"required"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // post /messages
-func (h *Handler) SaveMessage(c echo.Context) error {
+func (h *Handler) SendMessage(c echo.Context) error {
 
-	var req MessageRequest
+	var req SaveMessageRequest
 	if err := c.Bind(&req); err != nil {
 		if errors.Is(err, io.EOF) {
 			return echo.NewHTTPError(http.StatusBadRequest, "request body is empty")
@@ -83,27 +82,9 @@ func (h *Handler) SaveMessage(c echo.Context) error {
 
 	//
 
-	chatID, err := ulid.Parse(req.ChatID)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid chat ID")
-	}
-
-	//
-
-	//
-
-	senderID, err := ulid.Parse(req.SenderID)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid sender ID")
-	}
-
-	//
-
-	//
-
 	domainMsg := models.Message{
-		ChatID:   chatID,
-		SenderID: senderID,
+		ChatID:   req.ChatID,
+		SenderID: req.SenderID,
 		Type:     req.Type,
 		Content:  req.Content,
 		Metadata: req.Metadata,
@@ -129,13 +110,11 @@ type ListMessagesRequest struct {
 }
 
 type ListMessagesResponse struct {
-	Messages     []models.Message `json:"messages"`
-	HasMore      bool             `json:"has_more"`                // optional, indicates if there are more messages to fetch
-	LastMessage  ulid.ULID        `json:"last_message,omitempty"`  // optional, for pagination
-	FirstMessage ulid.ULID        `json:"first_message,omitempty"` // optional, for pagination
+	Messages []models.Message `json:"messages"`
+	HasMore  bool             `json:"has_more"` // optional, indicates if there are more messages to fetch
 }
 
-// get messages/?chat_id=xxx&anchor=xxx&limit=xxx
+// get messages/list?chat_id=xxx&anchor=xxx&limit=xxx
 func (h *Handler) ListMessages(c echo.Context) error {
 	var req ListMessagesRequest
 	if err := c.Bind(&req); err != nil {
@@ -156,42 +135,34 @@ func (h *Handler) ListMessages(c echo.Context) error {
 		return fmt.Errorf("validation system error: %w", err)
 	}
 
-	//
-	chatID, err := ulid.Parse(req.ChatID)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid chat ID")
-	}
-	AnchorID, err := ulid.Parse(req.AnchorID)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid anchor ID")
+	if req.AnchorID == "" {
+		req.AnchorID = "99999999999999999999999999" // a very large ULID to start from the latest messages
 	}
 
 	//
 
-	listMessages, HasMore, err := h.usecase.ListMessages(c.Request().Context(), chatID, AnchorID, req.Limit)
+	listMessages, HasMore, err := h.usecase.ListMessages(c.Request().Context(), req.ChatID, req.AnchorID, req.Limit)
 	if err != nil {
 		//TODO: Handle errors properly (database errors, etc.)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to list messages")
 	}
 
 	return c.JSON(http.StatusOK, ListMessagesResponse{
-		Messages:     listMessages,
-		HasMore:      HasMore,
-		LastMessage:  listMessages[len(listMessages)-1].ID, // for pagination
-		FirstMessage: listMessages[0].ID,                   // for pagination
+		Messages: listMessages,
+		HasMore:  HasMore,
 	})
 }
 
 //============================================================================
 
-type DeleteMessageRequest struct {
-	ChatID    string `json:"chat_id" validate:"required,ulid"`
-	MessageID string `json:"message_id" validate:"required,ulid"`
+type DeleteMessagesRequest struct {
+	ChatID     string   `json:"chat_id" validate:"required,ulid"`
+	MessageIDs []string `json:"message_ids" validate:"required,dive,ulid"`
 }
 
 // delete /messages?chat_id=xxx&message_id=xxx
-func (h *Handler) DeleteMessage(c echo.Context) error {
-	var req DeleteMessageRequest
+func (h *Handler) DeleteMessages(c echo.Context) error {
+	var req DeleteMessagesRequest
 	if err := c.Bind(&req); err != nil {
 		if errors.Is(err, io.EOF) {
 			return echo.NewHTTPError(http.StatusBadRequest, "request body is empty")
@@ -208,25 +179,12 @@ func (h *Handler) DeleteMessage(c echo.Context) error {
 		}
 		return err
 	}
-	//
 
 	//
 
 	//
 
-	chatID, err := ulid.Parse(req.ChatID)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid chat ID")
-	}
-
-	messageID, err := ulid.Parse(req.MessageID)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid message ID")
-	}
-
-	//
-
-	if err := h.usecase.DeleteMessage(c.Request().Context(), chatID, messageID); err != nil {
+	if err := h.usecase.DeleteMessage(c.Request().Context(), req.ChatID, req.MessageIDs); err != nil {
 		//TODO: Handle errors properly (message not found, database errors, etc.)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete message")
 	}
@@ -261,24 +219,9 @@ func (h *Handler) UpdateMessage(c echo.Context) error {
 	}
 
 	//
-	chatID, err := ulid.Parse(req.ChatID)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid chat ID")
-	}
 
 	//
-
-	//
-
-	messageID, err := ulid.Parse(req.MessageID)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid message ID")
-	}
-
-	//
-
-	//
-	err = h.usecase.UpdateMessage(c.Request().Context(), chatID, messageID, req.Content)
+	err := h.usecase.UpdateMessage(c.Request().Context(), req.ChatID, req.MessageID, req.Content)
 	if err != nil {
 		//TODO: handle error better
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to update message")
@@ -290,18 +233,18 @@ func (h *Handler) UpdateMessage(c echo.Context) error {
 
 //============================================================================
 
-// get messages/?chat_id=xxx&text=xxx
-
 type SearchMessagesRequest struct {
-	ChatID string `query:"chat_id" validate:"required,ulid"`
-	Text   string `query:"text" validate:"required"`
+	ChatID   string `query:"chat_id" validate:"required,ulid"`
+	Text     string `query:"text" validate:"required"`
+	AnchorID string `query:"anchor_id"` // optional, for pagination
 }
 
 type SearchMessagesResponse struct {
 	Messages []models.Message `json:"messages"`
 }
 
-func (h *Handler) SearchMessages(c echo.Context) error {
+// get messages/search?chat_id=xxx&text=xxx
+func (h *Handler) SearchMessagesByText(c echo.Context) error {
 	var req SearchMessagesRequest
 	if err := c.Bind(&req); err != nil {
 		if errors.Is(err, io.EOF) {
@@ -323,12 +266,22 @@ func (h *Handler) SearchMessages(c echo.Context) error {
 		}
 		return fmt.Errorf("validation system error: %w", err)
 	}
+
+	if req.AnchorID == "" {
+		req.AnchorID = "99999999999999999999999999" // a very large ULID to start from the latest messages
+	}
 	//
 
 	//
 
+	messages, err := h.usecase.GetMessageByText(c.Request().Context(), req.ChatID, req.Text, req.AnchorID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to search messages")
+	}
+
 	//
-	h.usecase.GetMessageByText()
+
+	return c.JSON(http.StatusOK, SearchMessagesResponse{Messages: messages})
 }
 
 func formatValidationError(err error) map[string]string {

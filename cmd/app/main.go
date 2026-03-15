@@ -2,10 +2,16 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"main/internal/app"
 	"main/internal/configs"
 	"main/internal/storage/mongo"
-	"main/internal/storage/mongo/repository"
-	"main/pkg/logger"
+	repo "main/internal/storage/mongo/repository"
+	uc "main/internal/usecase"
+	stplog "main/pkg/logger"
+
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
 )
 
 func main() {
@@ -19,8 +25,8 @@ func main() {
 
 	//Setup logger
 	ctx := context.Background()
-	log := logger.SetupLogger(cfg.Environment)
-	log.Info("Starting subscription service...")
+	logger := stplog.SetupLogger(cfg.Environment)
+	logger.Info("Starting message service...")
 	//
 
 	//
@@ -28,19 +34,37 @@ func main() {
 	//
 	client, err := mongo.ConnectMongoDB(ctx, cfg)
 	if err != nil {
-		log.Error("Failed to connect to MongoDB:", err)
+		logger.Error("Failed to connect to MongoDB:", err)
+	}
+
+	// Set read preference to primary for strong consistency
+	opts := options.Database().SetReadPreference(readpref.Primary())
+	db := client.Database(cfg.Mongo.DatabaseName, opts)
+
+	// Ensure indexes are created for the messages collection
+	messageRepo := repo.NewMessageRepository(db)
+	if err := messageRepo.EnsureIndexes(ctx); err != nil {
+		logger.Error("Failed to ensure indexes for messages collection:", err)
 	}
 	defer func() {
 		if err := client.Disconnect(ctx); err != nil {
-			log.Error("Error disconnecting from MongoDB:", err)
+			logger.Error("Error disconnecting from MongoDB:", err)
 		}
 	}()
 	//
 
-	//
+	usecase := uc.NewUsecase(messageRepo)
 
 	//
 
-	repo := repository.NewRepository(c)
+	//
+	go func() {
+		e := app.Run(*cfg, logger, usecase)
+		if err := e.Start(":" + fmt.Sprintf("%d", cfg.Server.Port)); err != nil {
+
+		}
+	}()
+
+	select {}
 
 }

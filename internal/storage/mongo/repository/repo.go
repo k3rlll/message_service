@@ -14,17 +14,19 @@ var (
 )
 
 type MessageRepository struct {
-	col *mongo.Collection
+	coll *mongo.Collection
 }
 
 func NewMessageRepository(db *mongo.Database) *MessageRepository {
 	return &MessageRepository{
-		col: db.Collection(messagesCollection),
+		coll: db.Collection(messagesCollection),
 	}
 }
 
+// create indexes to speed up operations
 func (r *MessageRepository) EnsureIndexes(ctx context.Context) error {
-	//create unique indexes
+	//
+
 	indexModel := mongo.IndexModel{
 		Keys: bson.D{
 			{Key: "chat_id", Value: 1},
@@ -35,7 +37,9 @@ func (r *MessageRepository) EnsureIndexes(ctx context.Context) error {
 		),
 	}
 
-	_, err := r.col.Indexes().CreateOne(ctx, indexModel)
+	//
+
+	_, err := r.coll.Indexes().CreateOne(ctx, indexModel)
 	if err != nil {
 		return fmt.Errorf("failed to create indexes for messages collection: %w", err)
 	}
