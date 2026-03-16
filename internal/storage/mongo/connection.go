@@ -15,9 +15,17 @@ func ConnectMongoDB(ctx context.Context, cfg *configs.Config) (*mongo.Client, er
 	//
 
 	//
+	clientOptions := &options.ClientOptions{
+		// Set up MongoDB client options with authentication
+		Auth: &options.Credential{
+			AuthMechanism: cfg.Mongo.AuthMechanism,
+			Username:      cfg.Mongo.Username,
+			Password:      cfg.Mongo.Password,
+		},
+	}
 	//
 	// Set up MongoDB client options
-	clientOptions := options.Client().ApplyURI(cfg.Mongo.URI).
+	clientOptions = options.Client().ApplyURI(cfg.Mongo.URI).
 		SetConnectTimeout(cfg.Mongo.ConnectTimeout).
 		SetServerSelectionTimeout(5 * time.Second).
 		SetMaxPoolSize(50).
@@ -26,14 +34,6 @@ func ConnectMongoDB(ctx context.Context, cfg *configs.Config) (*mongo.Client, er
 	//
 
 	//
-	clientOptions = &options.ClientOptions{
-		// Set up MongoDB client options with authentication
-		Auth: &options.Credential{
-			AuthMechanism: cfg.Mongo.AuthMechanism,
-			Username:      cfg.Mongo.Username,
-			Password:      cfg.Mongo.Password,
-		},
-	}
 
 	//
 
@@ -52,5 +52,3 @@ func ConnectMongoDB(ctx context.Context, cfg *configs.Config) (*mongo.Client, er
 
 	return client, nil
 }
-
-

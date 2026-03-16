@@ -54,7 +54,7 @@ type SaveMessageRequest struct {
 	SenderID string         `json:"sender_id" validate:"required,ulid"`
 	Type     string         `json:"type" validate:"required,oneof=text image video audio system"`
 	Content  string         `json:"content" validate:"required"`
-	Metadata map[string]any `json:"metadata,omitempty"`
+	Metadata map[string]any `json:"metadata"` // optional, system messages can have metadata like "event": "user_joined"
 }
 
 // post /messages

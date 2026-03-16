@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"main/internal/app"
 	"main/internal/configs"
 	"main/internal/storage/mongo"
@@ -26,7 +25,6 @@ func main() {
 	//Setup logger
 	ctx := context.Background()
 	logger := stplog.SetupLogger(cfg.Environment)
-	logger.Info("Starting message service...")
 	//
 
 	//
@@ -34,7 +32,8 @@ func main() {
 	//
 	client, err := mongo.ConnectMongoDB(ctx, cfg)
 	if err != nil {
-		logger.Error("Failed to connect to MongoDB:", err)
+		logger.Error("Failed to connect to MongoDB:", "error", err)
+		return
 	}
 
 	// Set read preference to primary for strong consistency
@@ -44,25 +43,29 @@ func main() {
 	// Ensure indexes are created for the messages collection
 	messageRepo := repo.NewMessageRepository(db)
 	if err := messageRepo.EnsureIndexes(ctx); err != nil {
-		logger.Error("Failed to ensure indexes for messages collection:", err)
+		logger.Error("Failed to ensure indexes for messages collection:", "error", err)
+		return
 	}
 	defer func() {
 		if err := client.Disconnect(ctx); err != nil {
-			logger.Error("Error disconnecting from MongoDB:", err)
+			logger.Error("Error disconnecting from MongoDB:", "error", err)
+			return
 		}
 	}()
 	//
 
 	usecase := uc.NewUsecase(messageRepo)
-
+	logger.Info("Starting message service on " + cfg.Server.Host + ":" + cfg.Server.Port)
 	//
 
-	//
+	// Start the server in a separate goroutine
 	go func() {
 		e := app.Run(*cfg, logger, usecase)
-		if err := e.Start(":" + fmt.Sprintf("%d", cfg.Server.Port)); err != nil {
-
+		if err := e.Start(":" + cfg.Server.Port); err != nil {
+			logger.Error("Error starting server:", "error", err)
+			return
 		}
+
 	}()
 
 	select {}

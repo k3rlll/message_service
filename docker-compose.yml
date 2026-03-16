@@ -17,6 +17,7 @@ services:
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
       - MONGO_INITDB_DATABASE=${MONGO_DATABASE}
+      - MONGO_INITDB_AUTH_MECHANISM=${MONGO_AUTH_MECHANISM}
     volumes:
       - mongodb_data:/data/db
     command:
@@ -42,8 +43,8 @@ services:
     env_file:
       - .env
     environment:
-      - DB_HOST=mongodb
-      - DB_PORT=${MONGO_PORT}
+      - MONGO_HOST=mongodb
+      - MONGO_PORT=${MONGO_PORT}
     depends_on:
       mongodb:
         condition: service_healthy

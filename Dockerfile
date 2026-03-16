@@ -13,7 +13,6 @@ FROM alpine:latest
 WORKDIR /app
 
 COPY --from=builder /app/message-api /app/message-api
-COPY --from=builder /app/config/config.yaml /app/config/config.yaml
 EXPOSE 8080
 
 CMD ["/app/message-api"]
