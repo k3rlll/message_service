@@ -4,7 +4,8 @@ import (
 	"errors"
 	"log/slog"
 	config "main/internal/configs"
-	handler "main/internal/handler/http"
+	handler "main/internal/transport/http"
+	mddlwr "main/internal/transport/middleware"
 	uc "main/internal/usecase"
 
 	"github.com/go-playground/validator/v10"
@@ -30,7 +31,7 @@ func Run(cfg config.Config, logger *slog.Logger, usecase *uc.Usecase) *echo.Echo
 
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
-
+	e.Use(mddlwr.AuthMiddleware(mddlwr.NewJWTManager(cfg.JWTSecret, cfg.JWTTTL)))
 	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
 		LogURI:      true,
 		LogStatus:   true,

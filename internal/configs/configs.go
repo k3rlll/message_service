@@ -14,6 +14,8 @@ type Config struct {
 	Environment string       `env:"ENVIRONMENT" env-default:"development"`
 	Mongo       Mongo        `yaml:"mongo"`
 	Server      ServerConfig `yaml:"server"`
+	JWTSecret   string       `env:"JWT_SECRET" env-required:"true"`
+	JWTTTL      int          `env:"JWT_TTL" env-default:"60"`
 }
 
 type ServerConfig struct {

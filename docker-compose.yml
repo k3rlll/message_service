@@ -19,7 +19,7 @@ services:
       - MONGO_INITDB_DATABASE=${MONGO_DATABASE}
       - MONGO_INITDB_AUTH_MECHANISM=${MONGO_AUTH_MECHANISM}
     volumes:
-      - mongodb_data:/data/db
+      - ${ROOT_DIR}/out/mongodb_data:/data/mongodb
     command:
       - "--auth"
       - "--wiredTigerCacheSizeGB=0.5"

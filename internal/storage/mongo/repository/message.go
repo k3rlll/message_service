@@ -10,23 +10,9 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-type MessageRepo struct {
-	ID        string
-	ChatID    string
-	SenderID  string
-	Type      string
-	Content   string
-	Metadata  map[string]any
-	CreatedAt time.Time
-	UpdatedAt time.Time
-}
-
 func (r *MessageRepository) SaveMessage(ctx context.Context, msg *models.Message) error {
 
-	//
-	var repoMsg MessageRepo
-
-	_, err := r.coll.InsertOne(ctx, repoMsg)
+	_, err := r.coll.InsertOne(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to save message: %w", err)
 	}
@@ -69,6 +55,7 @@ func (r *MessageRepository) ListMessages(
 	if err = cur.All(ctx, &messages); err != nil {
 		return nil, fmt.Errorf("failed to decode message results: %w", err)
 	}
+	fmt.Println("Found messages\n", messages)
 
 	return messages, nil
 }

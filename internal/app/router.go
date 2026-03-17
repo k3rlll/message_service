@@ -1,7 +1,7 @@
 package app
 
 import (
-	handler "main/internal/handler/http"
+	handler "main/internal/transport/http"
 
 	"github.com/labstack/echo/v4"
 )

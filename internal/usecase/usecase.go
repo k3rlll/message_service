@@ -74,7 +74,7 @@ func (u *Usecase) ListMessages(
 	if HasMore {
 		messages = messages[:limit]
 	}
-
+	fmt.Println(messages)
 	//
 
 	return messages, HasMore, nil

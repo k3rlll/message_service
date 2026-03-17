@@ -138,6 +138,9 @@ func (h *Handler) ListMessages(c echo.Context) error {
 	if req.AnchorID == "" {
 		req.AnchorID = "99999999999999999999999999" // a very large ULID to start from the latest messages
 	}
+	if req.Limit == 0 {
+		req.Limit = 20
+	}
 
 	//
 
@@ -147,6 +150,7 @@ func (h *Handler) ListMessages(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to list messages")
 	}
 
+	fmt.Println("Handler:", listMessages)
 	return c.JSON(http.StatusOK, ListMessagesResponse{
 		Messages: listMessages,
 		HasMore:  HasMore,
@@ -156,8 +160,8 @@ func (h *Handler) ListMessages(c echo.Context) error {
 //============================================================================
 
 type DeleteMessagesRequest struct {
-	ChatID     string   `json:"chat_id" validate:"required,ulid"`
-	MessageIDs []string `json:"message_ids" validate:"required,dive,ulid"`
+	ChatID     string   `query:"chat_id" validate:"required,ulid"`
+	MessageIDs []string `query:"message_ids" validate:"required,dive,ulid"`
 }
 
 // delete /messages?chat_id=xxx&message_id=xxx
@@ -195,12 +199,20 @@ func (h *Handler) DeleteMessages(c echo.Context) error {
 type UpdateMessageRequest struct {
 	ChatID    string `query:"chat_id" validate:"required,ulid"`
 	MessageID string `query:"message_id" validate:"required,ulid"`
-	Content   string `json:"content" validate:"required,eq=text"` //has to be "text" because updating pics, vids etc. is permitted
+	Content   string `json:"content" validate:"required"`
 }
 
 // put /messages?chat_id=xxx&message_id=xxx
 func (h *Handler) UpdateMessage(c echo.Context) error {
 	var req UpdateMessageRequest
+
+	// implicitly bind query params first, then bind JSON body for content
+	// echo's default binder doesn't support binding query params and body in one step,
+	// so we need to do it manually
+	if err := (&echo.DefaultBinder{}).BindQueryParams(c, &req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid query params")
+	}
+
 	if err := c.Bind(&req); err != nil {
 		if errors.Is(err, io.EOF) {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
