@@ -11,6 +11,7 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/redis/go-redis/v9"
 )
 
 type CustomValidator struct {
@@ -21,7 +22,7 @@ func (cv *CustomValidator) Validate(i interface{}) error {
 	return cv.validator.Struct(i)
 }
 
-func Run(cfg config.Config, logger *slog.Logger, usecase *uc.Usecase) *echo.Echo {
+func Run(cfg config.Config, logger *slog.Logger, usecase *uc.Usecase, redisClient *redis.Client) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.Validator = &CustomValidator{validator: validator.New()}
@@ -69,7 +70,7 @@ func Run(cfg config.Config, logger *slog.Logger, usecase *uc.Usecase) *echo.Echo
 		},
 	}))
 
-	handler := handler.NewHandler(e, usecase)
+	handler := handler.NewHandler(e, usecase, redisClient)
 	MapRoutes(e, handler)
 
 	return e

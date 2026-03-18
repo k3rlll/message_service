@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+// Usecase defines the interface for the business logic layer that the HTTP handler will interact with.
 type Usecase interface {
 	//
 	SaveMessage(ctx context.Context, req models.Message) error
@@ -36,15 +37,21 @@ type Usecase interface {
 	GetMessageByText(ctx context.Context, chatID string, text string, anchorID string) ([]models.Message, error)
 }
 
-type Handler struct {
-	echo    *echo.Echo
-	usecase Usecase
+type RedisUsecase interface {
+	PublishMessage(ctx context.Context, chatID string, message models.Message) error
 }
 
-func NewHandler(echo *echo.Echo, usecase Usecase) *Handler {
+type Handler struct {
+	echo         *echo.Echo
+	usecase      Usecase
+	redisUsecase RedisUsecase
+}
+
+func NewHandler(echo *echo.Echo, usecase Usecase, redisUsecase RedisUsecase) *Handler {
 	return &Handler{
-		echo:    echo,
-		usecase: usecase,
+		echo:         echo,
+		usecase:      usecase,
+		redisUsecase: redisUsecase,
 	}
 }
 
