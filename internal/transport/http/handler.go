@@ -5,67 +5,125 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 
-	"main/internal/models"
+	configs "main/internal/configs"
+	domain "main/internal/domain/message_entity"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
 )
 
-// Usecase defines the interface for the business logic layer that the HTTP handler will interact with.
-type Usecase interface {
-	//
-	SaveMessage(ctx context.Context, req models.Message) error
-	//
+type messageUsecase interface {
+	SaveMessage(ctx context.Context, req domain.Message) error
 
 	ListMessages(
 		ctx context.Context,
 		chatID string,
 		anchor string,
-		limit int64) ([]models.Message, bool, error)
-	//
+		limit int64) ([]domain.Message, bool, error)
 
-	DeleteMessage(ctx context.Context, chatID string, messageID []string) error
+	DeleteMessage(
+		ctx context.Context,
+		chatID string,
+		messageID []string) error
 
-	//
+	UpdateMessage(
+		ctx context.Context,
+		chatID string,
+		messageID string,
+		content string) error
 
-	UpdateMessage(ctx context.Context, chatID string, messageID string, content string) error
-
-	//
-
-	GetMessageByText(ctx context.Context, chatID string, text string, anchorID string) ([]models.Message, error)
+	GetMessageByText(
+		ctx context.Context,
+		chatID string,
+		text string,
+		anchorID string) ([]domain.Message, error)
 }
 
-type RedisUsecase interface {
-	PublishMessage(ctx context.Context, chatID string, message models.Message) error
+type redisUsecase interface {
+	PublishMessage(
+		ctx context.Context,
+		chatID string,
+		message domain.Message) error
+	//
+	SubscribeToChat(
+		ctx context.Context,
+		chatID string) (<-chan domain.Message, error)
 }
 
 type Handler struct {
 	echo         *echo.Echo
-	usecase      Usecase
-	redisUsecase RedisUsecase
+	logger       *slog.Logger
+	usecase      messageUsecase
+	redisUsecase redisUsecase
+	cfg          *configs.Config
 }
 
-func NewHandler(echo *echo.Echo, usecase Usecase, redisUsecase RedisUsecase) *Handler {
+func NewHandler(
+	echo *echo.Echo,
+	logger *slog.Logger,
+	usecase messageUsecase,
+	redisUsecase redisUsecase,
+	cfg *configs.Config) *Handler {
 	return &Handler{
 		echo:         echo,
+		logger:       logger,
 		usecase:      usecase,
 		redisUsecase: redisUsecase,
+		cfg:          cfg,
 	}
 }
 
-// MessageRequest represents the payload for creating a new message. DTO.
+// DTO
 type SaveMessageRequest struct {
 	ChatID   string         `json:"chat_id" validate:"required,ulid"`
 	SenderID string         `json:"sender_id" validate:"required,ulid"`
 	Type     string         `json:"type" validate:"required,oneof=text image video audio system"`
 	Content  string         `json:"content" validate:"required"`
-	Metadata map[string]any `json:"metadata"` // optional, system messages can have metadata like "event": "user_joined"
+	Metadata map[string]any `json:"metadata"`
+}
+type ListMessagesRequest struct {
+	ChatID   string `query:"chat_id" validate:"required,ulid"`
+	AnchorID string `query:"anchor,ulid"` // optional, for pagination
+	Limit    int64  `query:"limit" validate:"omitempty,min=1,max=100"`
+}
+
+type ListMessagesResponse struct {
+	Messages []domain.Message `json:"messages"`
+	HasMore  bool             `json:"has_more"` // optional, indicates if there are more messages to fetch
+}
+
+type DeleteMessagesRequest struct {
+	ChatID     string   `query:"chat_id" validate:"required,ulid"`
+	MessageIDs []string `query:"message_ids" validate:"required,dive,ulid"`
+}
+
+type UpdateMessageRequest struct {
+	ChatID    string `query:"chat_id" validate:"required,ulid"`
+	MessageID string `query:"message_id" validate:"required,ulid"`
+	Content   string `json:"content" validate:"required"`
+}
+
+type SearchMessagesRequest struct {
+	ChatID   string `query:"chat_id" validate:"required,ulid"`
+	Text     string `query:"text" validate:"required"`
+	AnchorID string `query:"anchor_id"`
+}
+
+type SearchMessagesResponse struct {
+	Messages []domain.Message `json:"messages"`
 }
 
 // post /messages
 func (h *Handler) SendMessage(c echo.Context) error {
+	const op = "http.Handler.SendMessage"
+	ctx := c.Request().Context()
+	h.logger.InfoContext(
+		ctx,
+		"Received SendMessage request",
+		slog.String("op", op))
 
 	var req SaveMessageRequest
 	if err := c.Bind(&req); err != nil {
@@ -75,8 +133,6 @@ func (h *Handler) SendMessage(c echo.Context) error {
 		return err
 	}
 
-	//
-
 	if err := c.Validate(&req); err != nil {
 		var validationErrs validator.ValidationErrors
 		if errors.As(err, &validationErrs) {
@@ -85,40 +141,20 @@ func (h *Handler) SendMessage(c echo.Context) error {
 		return fmt.Errorf("validation system error: %w", err)
 	}
 
-	//
-
-	//
-
-	domainMsg := models.Message{
+	domainMsg := domain.Message{
 		ChatID:   req.ChatID,
 		SenderID: req.SenderID,
 		Type:     req.Type,
 		Content:  req.Content,
 		Metadata: req.Metadata,
 	}
-	//
 
-	//
-
-	//
-
-	if err := h.usecase.SaveMessage(c.Request().Context(), domainMsg); err != nil {
+	if err := h.usecase.SaveMessage(ctx, domainMsg); err != nil {
 		//TODO: Handle errors properly (duplicate message, database errors, etc.)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to save message")
 	}
 
 	return c.JSON(http.StatusCreated, domainMsg)
-}
-
-type ListMessagesRequest struct {
-	ChatID   string `query:"chat_id" validate:"required,ulid"`
-	AnchorID string `query:"anchor,ulid"` // optional, for pagination
-	Limit    int64  `query:"limit" validate:"omitempty,min=1,max=100"`
-}
-
-type ListMessagesResponse struct {
-	Messages []models.Message `json:"messages"`
-	HasMore  bool             `json:"has_more"` // optional, indicates if there are more messages to fetch
 }
 
 // get messages/list?chat_id=xxx&anchor=xxx&limit=xxx
@@ -130,9 +166,6 @@ func (h *Handler) ListMessages(c echo.Context) error {
 		}
 		return err
 	}
-	//
-
-	//
 
 	if err := c.Validate(&req); err != nil {
 		var validationErrs validator.ValidationErrors
@@ -143,7 +176,8 @@ func (h *Handler) ListMessages(c echo.Context) error {
 	}
 
 	if req.AnchorID == "" {
-		req.AnchorID = "99999999999999999999999999" // a very large ULID to start from the latest messages
+		// очень большой ULID, чтобы начать с последних сообщений, если якорь не указан
+		req.AnchorID = "99999999999999999999999999"
 	}
 	if req.Limit == 0 {
 		req.Limit = 20
@@ -162,13 +196,6 @@ func (h *Handler) ListMessages(c echo.Context) error {
 		Messages: listMessages,
 		HasMore:  HasMore,
 	})
-}
-
-//============================================================================
-
-type DeleteMessagesRequest struct {
-	ChatID     string   `query:"chat_id" validate:"required,ulid"`
-	MessageIDs []string `query:"message_ids" validate:"required,dive,ulid"`
 }
 
 // delete /messages?chat_id=xxx&message_id=xxx
@@ -203,19 +230,10 @@ func (h *Handler) DeleteMessages(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-type UpdateMessageRequest struct {
-	ChatID    string `query:"chat_id" validate:"required,ulid"`
-	MessageID string `query:"message_id" validate:"required,ulid"`
-	Content   string `json:"content" validate:"required"`
-}
-
 // put /messages?chat_id=xxx&message_id=xxx
 func (h *Handler) UpdateMessage(c echo.Context) error {
 	var req UpdateMessageRequest
 
-	// implicitly bind query params first, then bind JSON body for content
-	// echo's default binder doesn't support binding query params and body in one step,
-	// so we need to do it manually
 	if err := (&echo.DefaultBinder{}).BindQueryParams(c, &req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid query params")
 	}
@@ -227,8 +245,6 @@ func (h *Handler) UpdateMessage(c echo.Context) error {
 		return err
 	}
 
-	//
-
 	if err := c.Validate(&req); err != nil {
 		var validationErrs validator.ValidationErrors
 		if errors.As(err, &validationErrs) {
@@ -237,29 +253,14 @@ func (h *Handler) UpdateMessage(c echo.Context) error {
 		return fmt.Errorf("validation system error: %w", err)
 	}
 
-	//
-
-	//
 	err := h.usecase.UpdateMessage(c.Request().Context(), req.ChatID, req.MessageID, req.Content)
 	if err != nil {
 		//TODO: handle error better
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to update message")
 	}
-	//
+
 	return c.NoContent(http.StatusNoContent)
-	//
-}
 
-//============================================================================
-
-type SearchMessagesRequest struct {
-	ChatID   string `query:"chat_id" validate:"required,ulid"`
-	Text     string `query:"text" validate:"required"`
-	AnchorID string `query:"anchor_id"` // optional, for pagination
-}
-
-type SearchMessagesResponse struct {
-	Messages []models.Message `json:"messages"`
 }
 
 // get messages/search?chat_id=xxx&text=xxx
@@ -272,12 +273,6 @@ func (h *Handler) SearchMessagesByText(c echo.Context) error {
 		return err
 	}
 
-	//
-
-	//
-
-	//
-
 	if err := c.Validate(&req); err != nil {
 		var validationErrs validator.ValidationErrors
 		if errors.As(err, &validationErrs) {
@@ -287,29 +282,27 @@ func (h *Handler) SearchMessagesByText(c echo.Context) error {
 	}
 
 	if req.AnchorID == "" {
-		req.AnchorID = "99999999999999999999999999" // a very large ULID to start from the latest messages
+		// очень большой ULID, чтобы начать с последних сообщений, если якорь не указан
+		req.AnchorID = "99999999999999999999999999"
 	}
-	//
-
-	//
 
 	messages, err := h.usecase.GetMessageByText(c.Request().Context(), req.ChatID, req.Text, req.AnchorID)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to search messages")
 	}
 
-	//
-
 	return c.JSON(http.StatusOK, SearchMessagesResponse{Messages: messages})
 }
 
+// функция помошник для форматирования ошибок валидации
+//
+// в более читаемый формат для клиента
 func formatValidationError(err error) map[string]string {
 	erro := make(map[string]string)
 	var vErrs validator.ValidationErrors
 
 	if errors.As(err, &vErrs) {
 		for _, f := range vErrs {
-			// f.Field() — name, f.Tag() — violated rule (required, email, etc.)
 			erro[f.Field()] = fmt.Sprintf("failed on the '%s' tag", f.Tag())
 		}
 	} else {

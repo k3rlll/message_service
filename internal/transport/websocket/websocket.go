@@ -25,7 +25,10 @@ type WebsocketTransport struct {
 	logger         *slog.Logger
 }
 
-func NewWebsocketTransport(cfg *configs.Config, echo *echo.Echo, logger *slog.Logger) *WebsocketTransport {
+func NewWebsocketTransport(
+	cfg *configs.Config,
+	echo *echo.Echo,
+	logger *slog.Logger) *WebsocketTransport {
 	return &WebsocketTransport{
 		echo:           echo,
 		publishLimiter: rate.NewLimiter(rate.Every(time.Millisecond*time.Duration(cfg.Websocket.Interval)), cfg.Websocket.PublishBurst),
@@ -44,4 +47,9 @@ func (wt *WebsocketTransport) RemoveSubscriber(sub *subscriber) {
 	wt.Mu.Lock()
 	defer wt.Mu.Unlock()
 	delete(wt.subscribers, sub)
+}
+
+
+func (wt *WebsocketTransport) WSHandler(message []byte) {
+	
 }

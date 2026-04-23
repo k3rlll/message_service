@@ -1,20 +1,45 @@
 package logger
 
 import (
+	"context"
 	"log/slog"
+	"main/pkg/ctxutils"
 	"os"
 )
 
-// SetupLogger initializes and returns a structured logger based on the provided environment.
+type ContextHandler struct {
+	slog.Handler
+}
+
+func (h ContextHandler) Handle(ctx context.Context, r slog.Record) error {
+	reqID := ctxutils.GetRequestID(ctx)
+
+	if reqID != "" {
+
+		r.AddAttrs(slog.String("request_id", reqID))
+	}
+
+	return h.Handler.Handle(ctx, r)
+}
+
+// SetupLogger инициализирует slog.Logger с учетом окружения
+//
+//	(production, development, local)
+//
+// и добавляет ContextHandler для включения Request ID в логи
 func SetupLogger(env string) *slog.Logger {
-	var log *slog.Logger
+	var baseHandler slog.Handler
+
 	switch env {
 	case "production":
-		log = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		baseHandler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 	case "development", "local":
-		log = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		baseHandler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
 	default:
-		log = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		baseHandler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 	}
-	return log
+
+	ctxHandler := ContextHandler{Handler: baseHandler}
+
+	return slog.New(ctxHandler)
 }

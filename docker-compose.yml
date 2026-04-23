@@ -6,7 +6,7 @@ services:
   mongodb:
     image: mongo:7.0
     container_name: message_db
-    restart: unless-stopped
+    restart: always
     networks:
       - app-network
     env_file:

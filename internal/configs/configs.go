@@ -36,8 +36,8 @@ type Mongo struct {
 }
 
 type Websocket struct {
-	PublishBurst int `yaml:"publish_burst" env-default:"20"`
-	Interval     int `yaml:"interval" env-default:"100"` // in milliseconds | interval between messages to prevent flooding
+	CompressionThreshold int  `yaml:"compression_threshold" env-default:"512"`  // В байтах, например 512 для отключения компрессии для сообщений меньше 512 байт
+	InsecureSkipVerify   bool `yaml:"insecure_skip_verify" env-default:"false"` // В проде замените на проверку Origin!
 }
 
 type RedisConfig struct {

@@ -1,13 +1,10 @@
-package models
+package message_entity
 
 import (
 	"time"
 )
 
-// Message represents a chat message in the system.
-// will be stored in MongoDB and contains all necessary information about the message,
-//
-// including its type, content, metadata, and timestamps.
+
 type Message struct {
 	ID        string         `bson:"_id,omitempty"`
 	ChatID    string         `bson:"chat_id"`

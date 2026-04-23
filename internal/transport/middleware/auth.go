@@ -1,36 +1,53 @@
 package middleware
 
 import (
+	"errors"
+	"net/http"
 	"strings"
 
+	domain "main/internal/domain/token_entity"
+	errHandler "main/pkg/error_handler"
+
 	"github.com/labstack/echo/v4"
-	"github.com/oklog/ulid/v2"
 )
 
-func AuthMiddleware(JWTManager *JWTManager) echo.MiddlewareFunc {
+func AuthMiddleware(jwtManager JWTManager) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 
 			header := c.Request().Header.Get("authorization")
-			if header == "" || !strings.HasPrefix(header, "Bearer ") {
-				return echo.NewHTTPError(401, "Unauthorized")
+			if header == "" ||
+				!strings.HasPrefix(header, "Bearer ") {
+				return &errHandler.AppError{
+					HTTPCode: http.StatusUnauthorized,
+					Code:     "INVALID_REQUEST",
+					Message:  "invalid request",
+				}
 			}
 
 			accessToken := strings.TrimPrefix(header, "Bearer ")
 
-			// For testing purposes, we can bypass JWT verification if the token is "admin"
-			if accessToken == "admin" {
-				userID := ulid.Make()
-				c.Set("userID", userID)
-				return next(c)
-			}
-
-			userID, err := JWTManager.VerifyAccessToken(accessToken)
+			userID, err := jwtManager.VerifyAccessToken(accessToken)
 			if err != nil {
-				return echo.NewHTTPError(401, "Unauthorized")
+				if errors.Is(err, domain.ErrInvalidToken) ||
+					errors.Is(err, domain.ErrTokenExpired) {
+					return &errHandler.AppError{
+						HTTPCode: http.StatusUnauthorized,
+						Code:     "INVALID_REQUEST",
+						Message:  "invalid request",
+					}
+				}
+
+				return &errHandler.AppError{
+					HTTPCode: http.StatusInternalServerError,
+					Code:     "INTERNAL_ERROR",
+					Message:  "internal server error",
+				}
 			}
 
 			c.Set("userID", userID)
+			// c.Set("role", role)
+
 			return next(c)
 		}
 	}

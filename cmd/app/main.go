@@ -9,6 +9,7 @@ import (
 	uc "main/internal/usecase"
 	stplog "main/pkg/logger"
 
+	"github.com/go-redis/redis/v8"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 )
@@ -35,6 +36,14 @@ func main() {
 		logger.Error("Failed to connect to MongoDB:", "error", err)
 		return
 	}
+	//Redis client
+	rdb := redis.NewClient(&redis.Options{
+		Addr:       "localhost:6379",
+		ClientName: cfg.Redis.ClientName,
+		Password:   cfg.Redis.Password,
+
+		DB: 0,
+	})
 
 	// Set read preference to primary for strong consistency
 	opts := options.Database().SetReadPreference(readpref.Primary())

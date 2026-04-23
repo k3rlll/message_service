@@ -3,10 +3,12 @@ package app
 import (
 	"errors"
 	"log/slog"
+
 	config "main/internal/configs"
 	handler "main/internal/transport/http"
 	mddlwr "main/internal/transport/middleware"
 	uc "main/internal/usecase"
+	errHandler "main/pkg/error_handler"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
@@ -28,7 +30,9 @@ func Run(cfg config.Config, logger *slog.Logger, usecase *uc.Usecase, redisClien
 	e.Validator = &CustomValidator{validator: validator.New()}
 
 	// custom error handler
-	e.HTTPErrorHandler = CustomHTTPErrorHandler
+	e.HTTPErrorHandler = func(err error, c echo.Context) {
+		errHandler.CustomHTTPErrorHandler(err, c, logger)
+	}
 
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
@@ -43,6 +47,7 @@ func Run(cfg config.Config, logger *slog.Logger, usecase *uc.Usecase, redisClien
 		HandleError: true,
 		LogValuesFunc: func(c echo.Context, v middleware.RequestLoggerValues) error {
 			attrs := []any{
+				slog.String("request_id", c.Response().Header().Get("X-Request-ID")),
 				slog.String("method", v.Method),
 				slog.String("uri", v.URI),
 				slog.Int("status", v.Status),

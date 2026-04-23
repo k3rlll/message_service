@@ -3,3 +3,7 @@ env: "development"
 mongo:
   initialization_timeout: "30s"
   connect_timeout: "10s"
+
+websocket:
+  compression_threshold: 512 # В байтах, например 512 для отключения компрессии для сообщений меньше 512 байт
+  insecure_skip_verify: true # В проде замените на проверку Origin!
