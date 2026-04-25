@@ -7,7 +7,7 @@ type IncomingMessage struct {
 	Text   string `json:"text"`
 }
 
-// OutgoingMessage - то, что мы шлем клиенту уже обогащенное
+// OutgoingMessage шлем клиенту уже обогащенное
 type OutgoingMessage struct {
 	ID        string    `json:"id"`
 	ChatID    string    `json:"chat_id"`

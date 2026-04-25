@@ -10,7 +10,7 @@ type Hub struct {
 	users      map[string]map[*Client]bool
 	register   chan *Client
 	unregister chan *Client
-	deliver    chan DeliveryTask
+	Deliver    chan DeliveryTask
 	logger     *slog.Logger
 }
 
@@ -19,7 +19,7 @@ func NewHub(logger *slog.Logger) *Hub {
 		users:      make(map[string]map[*Client]bool),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
-		deliver:    make(chan DeliveryTask),
+		Deliver:    make(chan DeliveryTask),
 		logger:     logger,
 	}
 }
@@ -64,7 +64,7 @@ func (h *Hub) Run(ctx context.Context) {
 
 				}
 			}
-		case task := <-h.deliver:
+		case task := <-h.Deliver:
 			for _, userID := range task.TargetUserIDs {
 				connections, ok := h.users[userID]
 				if !ok {
@@ -74,11 +74,16 @@ func (h *Hub) Run(ctx context.Context) {
 				for client := range connections {
 					select {
 					case client.send <- task.Payload:
-						// Успешно положили в буфер
+						h.logger.DebugContext(
+							ctx, "Delivered message to client",
+							"op", op,
+							"userID", client.userID,
+						)
+						// Сообщение успешно поставлено в канал отправки клиента
 					default:
 						// Буфер переполнен! Клиент медленный или завис
 						// Принудительно отключаем его, чтобы Хаб не заблокировался
-						h.logger.WarnContext(
+						h.logger.DebugContext(
 							ctx, "Slow client detected, disconnecting",
 							"op", op,
 							"userID", client.userID,

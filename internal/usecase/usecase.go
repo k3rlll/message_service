@@ -3,26 +3,38 @@ package usecase
 import (
 	"context"
 	"fmt"
-	"main/internal/models"
+	domain "main/internal/domain/message_entity"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 )
 
 type Repo interface {
-	SaveMessage(ctx context.Context, msg *models.Message) error
+	SaveMessage(ctx context.Context, msg *domain.Message) error
 
 	//
-	ListMessages(ctx context.Context, chatID, anchor string, limit int64) ([]models.Message, error)
+	ListMessages(
+		ctx context.Context,
+		chatID,
+		anchor string,
+		limit int64) ([]domain.Message, error)
 
 	//
 	DeleteMessages(ctx context.Context, chatID string, messageIDs []string) error
 
 	//
-	UpdateMessage(ctx context.Context, chatID string, messageID string, content string) error
+	UpdateMessage(
+		ctx context.Context,
+		chatID string,
+		messageID string,
+		content string) error
 
 	//
-	GetMessageByText(ctx context.Context, chatID string, text string, anchorID string) ([]models.Message, error)
+	GetMessageByText(
+		ctx context.Context,
+		chatID string,
+		text string,
+		anchorID string) ([]domain.Message, error)
 }
 
 type Usecase struct {
@@ -35,7 +47,7 @@ func NewUsecase(repo Repo) *Usecase {
 	}
 }
 
-func (u *Usecase) SaveMessage(ctx context.Context, req models.Message) error {
+func (u *Usecase) SaveMessage(ctx context.Context, req domain.Message) error {
 
 	//
 
@@ -59,7 +71,7 @@ func (u *Usecase) ListMessages(
 	ctx context.Context,
 	chatID string,
 	anchor string,
-	limit int64) ([]models.Message, bool, error) {
+	limit int64) ([]domain.Message, bool, error) {
 
 	//
 
@@ -80,7 +92,11 @@ func (u *Usecase) ListMessages(
 	return messages, HasMore, nil
 }
 
-func (u *Usecase) GetMessageByText(ctx context.Context, chatID string, text string, anchorID string) ([]models.Message, error) {
+func (u *Usecase) GetMessageByText(
+	ctx context.Context,
+	chatID string,
+	text string,
+	anchorID string) ([]domain.Message, error) {
 
 	//
 
@@ -94,7 +110,10 @@ func (u *Usecase) GetMessageByText(ctx context.Context, chatID string, text stri
 	return messages, nil
 }
 
-func (u *Usecase) DeleteMessage(ctx context.Context, chatID string, messageIDs []string) error {
+func (u *Usecase) DeleteMessage(
+	ctx context.Context,
+	chatID string,
+	messageIDs []string) error {
 
 	//
 
@@ -108,7 +127,11 @@ func (u *Usecase) DeleteMessage(ctx context.Context, chatID string, messageIDs [
 	return nil
 }
 
-func (u *Usecase) UpdateMessage(ctx context.Context, chatID string, messageID string, content string) error {
+func (u *Usecase) UpdateMessage(
+	ctx context.Context,
+	chatID string,
+	messageID string,
+	content string) error {
 
 	//
 

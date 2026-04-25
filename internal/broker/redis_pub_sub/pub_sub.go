@@ -3,83 +3,76 @@ package redis_pub_sub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 
-	domain "main/internal/domain/message_entity"
+	ws "main/internal/ws"
 
 	"github.com/redis/go-redis/v9"
 )
 
-type RdbRepo struct {
+type PubSub struct {
 	Client *redis.Client
 	logger *slog.Logger
 }
 
-func RedisNewClient(client *redis.Client, logger *slog.Logger) RdbRepo {
-	return RdbRepo{
+func NewPubSub(client *redis.Client, logger *slog.Logger) PubSub {
+	return PubSub{
 		Client: client,
 		logger: logger,
 	}
 }
 
-func (r *RdbRepo) PublishMessage(
-	ctx context.Context,
-	chatID string,
-	message domain.Message) error {
-
-	channel := fmt.Sprintf("chat:%s", chatID)
-
-	msgBytes, err := json.Marshal(message)
-	if err != nil {
-		return fmt.Errorf("failed to marshal message: %w", err)
-	}
-
-	//
-
-	err = r.Client.Publish(ctx, channel, msgBytes).Err()
-	if err != nil {
-		return fmt.Errorf("failed to publish message: %w", err)
-	}
-	return nil
+type RedisRepoInterface interface {
+	Set(ctx context.Context, key string, value interface{}) error
+	Get(ctx context.Context, key string) (string, error)
 }
 
-func (r *RdbRepo) SubscribeToChat(
+// StartRedisSubscriber запускает горутину, которая подписывается на канал Redis
+// и обрабатывает входящие сообщения
+func (r *PubSub) StartRedisSubscriber(
 	ctx context.Context,
-	chatID string) (<-chan domain.Message, error) {
+	rdb *redis.Client,
+	hub *ws.Hub) {
 
-	const op = "RdbRepo.SubscribeToChat"
+	op := "PubSub.StartRedisSubscriber"
+	r.logger.InfoContext(ctx, "Starting Redis subscriber", "op", op)
 
-	channel := fmt.Sprintf("chat:%s", chatID)
-	pubsub := r.Client.Subscribe(ctx, channel)
+	pubsub := rdb.Subscribe(ctx, "channel:chat_events")
+	defer pubsub.Close()
 
-	// Канал для отправки сообщений в обработчик
-	msgChan := make(chan domain.Message)
+	ch := pubsub.Channel()
 
-	// Запускаем горутину для обработки входящих сообщений
-	go func() {
-		defer pubsub.Close()
-		for {
-			msg, err := pubsub.ReceiveMessage(ctx)
-			if err != nil {
+	for {
+		select {
+		case <-ctx.Done():
+			r.logger.InfoContext(
+				ctx, "Shutting down Redis subscriber",
+				"op", op,
+			)
+			return
+		case msg := <-ch:
+			
+			var outMsg ws.OutgoingMessage
+
+			if err := json.Unmarshal([]byte(msg.Payload), &outMsg); err != nil {
 				r.logger.ErrorContext(
-					ctx, "Error receiving message",
-					"op", op, "err", err)
+					ctx, "Failed to unmarshal Redis message",
+					"op", op,
+					"err", err,
+				)
 				continue
 			}
 
-			var message domain.Message
-			err = json.Unmarshal([]byte(msg.Payload), &message)
-			if err != nil {
-				r.logger.ErrorContext(
-					ctx, "Error unmarshaling message",
-					"op", op, "err", err)
-				continue
-			}
+			// Узнаем, кому доставить сообщение.
+			// Идем в Redis Set (или кэш), где хранятся участники ChatID
+			// members := rdb.SMembers(ctx, "chat_members:" + outMsg.ChatID).Val()
+			members := []string{outMsg.SenderID, "user_2", "user_3"} // Mock
 
-			msgChan <- message
+			// Отправляем задачу в Хаб
+			hub.Deliver <- ws.DeliveryTask{
+				TargetUserIDs: members,
+				Payload:       []byte(msg.Payload),
+			}
 		}
-	}()
-
-	return msgChan, nil
+	}
 }

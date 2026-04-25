@@ -7,3 +7,12 @@ mongo:
 websocket:
   compression_threshold: 512 # В байтах, например 512 для отключения компрессии для сообщений меньше 512 байт
   insecure_skip_verify: true # В проде замените на проверку Origin!
+
+
+jwt:
+  ttl: 120 # В минутах, например 120 для 2 часов
+
+in_memory_cache:
+  expiry_minutes: "5m"
+  max_size: 1000
+  initial_capacity: 1000

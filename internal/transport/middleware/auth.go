@@ -11,7 +11,12 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-func AuthMiddleware(jwtManager JWTManager) echo.MiddlewareFunc {
+type JWTManagerUsecase interface {
+	NewAccessToken(userID string) (string, error)
+	VerifyAccessToken(tokenString string) (string, error)
+}
+
+func AuthMiddleware(jwtManager JWTManagerUsecase) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 

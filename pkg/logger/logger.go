@@ -39,6 +39,7 @@ func SetupLogger(env string) *slog.Logger {
 		baseHandler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 	}
 
+
 	ctxHandler := ContextHandler{Handler: baseHandler}
 
 	return slog.New(ctxHandler)
