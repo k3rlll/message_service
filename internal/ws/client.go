@@ -15,8 +15,22 @@ import (
 const (
 	maxMessageSize = 512
 	bufferSize     = 256
-	timeTicker     = 54 // timeTicker должен быть меньше, чем таймаут для PING/PONG, чтобы мы успевали отправлять PING до того, как соединение будет признано мертвым
+
+	// timeTicker должен быть меньше, чем таймаут для PING/PONG,
+	//  чтобы мы успевали отправлять PING до того,
+	//  как соединение будет признано мертвым
+	timeTicker = 54
 )
+
+// Usecase логика, которая нужна клиенту для проверки прав доступа
+// и получения информации о чатах
+type InMemoryCache interface {
+	IsUserInChat(ctx context.Context, userID, chatID string) (bool, error)
+}
+
+type MessageUsecase interface {
+	SaveMessage(ctx context.Context, chatID, senderID, text string) (string, time.Time, error)
+}
 
 type Client struct {
 	hub    *Hub
@@ -24,7 +38,9 @@ type Client struct {
 	userID string
 	send   chan []byte
 
-	logger *slog.Logger
+	messageUsecase MessageUsecase
+	cache          InMemoryCache
+	logger         *slog.Logger
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn, userID string, logger *slog.Logger) *Client {
@@ -90,23 +106,52 @@ func (c *Client) readPump(ctx context.Context, rdb *redis.Client) {
 			continue // Игнорируем мусор
 		}
 
-		// TODO: Дальше нам нужно:
-		// Проверяем в in-memory/Redis/БД: Является ли c.userID членом incoming.ChatID?
-		// if !isMember(ctx, c.userID, incoming.ChatID) { continue }
+		isUserInChat, err := c.cache.IsUserInChat(ctx, c.userID, incoming.ChatID)
+		if err != nil {
+			c.logger.ErrorContext(
+				ctx, "Error checking if user is in chat",
+				"op", op,
+				"userID", c.userID,
+				"chatID", incoming.ChatID,
+				"error", err,
+			)
+			continue
+		}
+		if !isUserInChat {
+			c.logger.InfoContext(
+				ctx, "User is not a member of the chat",
+				"op", op,
+				"userID", c.userID,
+				"chatID", incoming.ChatID,
+			)
+			continue
+		}
+
 		// Сохраняем сообщение в БД, получаем ID и дату создания
+
+		messageID, createdAt, err := c.messageUsecase.SaveMessage(ctx, incoming.ChatID, c.userID, incoming.Text)
+		if err != nil {
+			c.logger.ErrorContext(
+				ctx, "Error saving message",
+				"op", op,
+				"userID", c.userID,
+				"chatID", incoming.ChatID,
+				"error", err,
+			)
+			continue
+		}
 
 		// Формируем финальное сообщение
 		finalMsg := OutgoingMessage{
-			//TODO: ID
-			ID:        "uuid-v7-from-db", // Генерится БД
+			ID:        messageID,
 			ChatID:    incoming.ChatID,
 			SenderID:  c.userID,
 			Text:      incoming.Text,
-			CreatedAt: time.Now(),
+			CreatedAt: createdAt,
 		}
 
 		// ПУБЛИКАЦИЯ В REDIS PUB/SUB
-		// Публикуем в канал чата 
+		// Публикуем в канал чата
 		bytesToSend, err := json.Marshal(finalMsg)
 		if err != nil {
 			c.logger.ErrorContext(
@@ -126,6 +171,7 @@ func (c *Client) writePump(ctx context.Context) {
 	op := "Client.writePump"
 	c.logger.InfoContext(ctx, "Starting write pump for client", "op", op, "userID", c.userID)
 
+	// Определяем частоту отправки ping сообщений чтобы поддерживать соединение живым.
 	ticker := time.NewTicker(timeTicker * time.Second)
 
 	defer func() {
@@ -149,7 +195,7 @@ func (c *Client) writePump(ctx context.Context) {
 			return
 		case message, ok := <-c.send:
 			if !ok {
-				// Канал закрыт - значит хаб решил отключить клиента
+				// Канал закрыт это значит хаб решил отключить клиента
 				c.logger.InfoContext(
 					ctx, "Send channel closed, stopping write pump",
 					"op", op,
@@ -159,8 +205,10 @@ func (c *Client) writePump(ctx context.Context) {
 			}
 
 			ctxWrite, cancel := context.WithTimeout(ctx, 10*time.Second)
+
 			err := c.conn.Write(ctxWrite, websocket.MessageText, message)
 			cancel()
+
 			switch {
 			case err == nil:
 				// Успешная отправка
@@ -180,9 +228,11 @@ func (c *Client) writePump(ctx context.Context) {
 					"userID", c.userID,
 					"error", err,
 				)
+
 			}
+
 		case <-ticker.C:
-			// Отправляем PING, чтобы поддерживать соединение живым
+			// Отправляем PING чтобы поддерживать соединение живым
 			ctxPing, cancel := context.WithTimeout(ctx, 10*time.Second)
 			err := c.conn.Ping(ctxPing)
 			cancel()

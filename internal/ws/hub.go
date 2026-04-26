@@ -68,6 +68,11 @@ func (h *Hub) Run(ctx context.Context) {
 			for _, userID := range task.TargetUserIDs {
 				connections, ok := h.users[userID]
 				if !ok {
+					h.logger.DebugContext(
+						ctx, "User is offline, skipping delivery",
+						"op", op,
+						"userID", userID,
+					)
 					continue // Пользователь оффлайн на этом экземпляре сервера
 				}
 
@@ -82,7 +87,7 @@ func (h *Hub) Run(ctx context.Context) {
 						// Сообщение успешно поставлено в канал отправки клиента
 					default:
 						// Буфер переполнен! Клиент медленный или завис
-						// Принудительно отключаем его, чтобы Хаб не заблокировался
+						// Принудительно отключаем его чтобы Хаб не заблокировался
 						h.logger.DebugContext(
 							ctx, "Slow client detected, disconnecting",
 							"op", op,

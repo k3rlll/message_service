@@ -58,7 +58,7 @@ type Handler struct {
 	logger       *slog.Logger
 	usecase      messageUsecase
 	redisUsecase redisUsecase
-	cfg          *configs.Config
+	cfg          configs.Config
 }
 
 func NewHandler(
@@ -66,7 +66,7 @@ func NewHandler(
 	logger *slog.Logger,
 	usecase messageUsecase,
 	redisUsecase redisUsecase,
-	cfg *configs.Config) *Handler {
+	cfg configs.Config) *Handler {
 	return &Handler{
 		echo:         echo,
 		logger:       logger,

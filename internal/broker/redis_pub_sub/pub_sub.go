@@ -12,14 +12,24 @@ import (
 
 type PubSub struct {
 	Client *redis.Client
+
+	cache  InMemoryCache
 	logger *slog.Logger
 }
 
-func NewPubSub(client *redis.Client, logger *slog.Logger) PubSub {
+func NewPubSub(client *redis.Client, cache InMemoryCache, logger *slog.Logger) PubSub {
 	return PubSub{
 		Client: client,
+
+		cache:  cache,
 		logger: logger,
 	}
+}
+
+// Usecase логика, которая нужна клиенту для проверки прав доступа
+// и получения информации о чатах
+type InMemoryCache interface {
+	ChatUserIDs(ctx context.Context, chatID string) ([]string, error)
 }
 
 type RedisRepoInterface interface {
@@ -51,7 +61,7 @@ func (r *PubSub) StartRedisSubscriber(
 			)
 			return
 		case msg := <-ch:
-			
+
 			var outMsg ws.OutgoingMessage
 
 			if err := json.Unmarshal([]byte(msg.Payload), &outMsg); err != nil {
@@ -66,7 +76,17 @@ func (r *PubSub) StartRedisSubscriber(
 			// Узнаем, кому доставить сообщение.
 			// Идем в Redis Set (или кэш), где хранятся участники ChatID
 			// members := rdb.SMembers(ctx, "chat_members:" + outMsg.ChatID).Val()
-			members := []string{outMsg.SenderID, "user_2", "user_3"} // Mock
+			members, err := r.cache.ChatUserIDs(ctx, outMsg.ChatID)
+			if err != nil {
+				//TODO: обработка ошибок
+				r.logger.ErrorContext(
+					ctx, "Failed to get chat user IDs",
+					"op", op,
+					"chatID", outMsg.ChatID,
+					"err", err,
+				)
+				continue
+			}
 
 			// Отправляем задачу в Хаб
 			hub.Deliver <- ws.DeliveryTask{
