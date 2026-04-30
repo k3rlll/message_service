@@ -10,8 +10,11 @@ import (
 
 	configs "main/internal/configs"
 	domain "main/internal/domain/message_entity"
+	ws "main/internal/ws"
 
+	"github.com/coder/websocket"
 	"github.com/go-playground/validator/v10"
+	"github.com/go-redis/redis/v8"
 	"github.com/labstack/echo/v4"
 )
 
@@ -77,6 +80,7 @@ func NewHandler(
 }
 
 // DTO
+
 type SaveMessageRequest struct {
 	ChatID   string         `json:"chat_id" validate:"required,ulid"`
 	SenderID string         `json:"sender_id" validate:"required,ulid"`
@@ -84,6 +88,7 @@ type SaveMessageRequest struct {
 	Content  string         `json:"content" validate:"required"`
 	Metadata map[string]any `json:"metadata"`
 }
+
 type ListMessagesRequest struct {
 	ChatID   string `query:"chat_id" validate:"required,ulid"`
 	AnchorID string `query:"anchor,ulid"` // optional, for pagination
@@ -116,45 +121,63 @@ type SearchMessagesResponse struct {
 	Messages []domain.Message `json:"messages"`
 }
 
-// post /messages
-func (h *Handler) SendMessage(c echo.Context) error {
-	const op = "http.Handler.SendMessage"
-	ctx := c.Request().Context()
-	h.logger.InfoContext(
-		ctx,
-		"Received SendMessage request",
-		slog.String("op", op))
+// Handler для WebSocket соединений. Апгрейдит HTTP в WS, создает клиента и регистрирует его в Хабе.
+func (h *Handler) WSHandler(hub *ws.Hub, rdb *redis.Client) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		op := "Handler.WSHandler"
+		userID := c.Get("user_id").(string)
+		ctx := c.Request().Context()
 
-	var req SaveMessageRequest
-	if err := c.Bind(&req); err != nil {
-		if errors.Is(err, io.EOF) {
-			return echo.NewHTTPError(http.StatusBadRequest, "request body is empty")
+		h.logger.InfoContext(
+			ctx, "WebSocket connection attempt",
+			"op", op,
+			"userID", userID,
+		)
+
+		// Апгрейд соединения
+		conn, err := websocket.Accept(c.Response(), c.Request(), &websocket.AcceptOptions{
+			InsecureSkipVerify: true, // Настроить OriginPatterns в проде!
+		})
+		if err != nil {
+			h.logger.ErrorContext(
+				ctx, "Failed to accept WebSocket connection",
+				"op", op,
+				"userID", userID,
+				"error", err,
+			)
+			return err // Ошибка рукопожатия
 		}
-		return err
-	}
 
-	if err := c.Validate(&req); err != nil {
-		var validationErrs validator.ValidationErrors
-		if errors.As(err, &validationErrs) {
-			return echo.NewHTTPError(http.StatusUnprocessableEntity, formatValidationError(err))
+		client := &ws.Client{
+			Hub:    hub,
+			Conn:   conn,
+			UserID: userID,
+			Send:   make(chan []byte, h.cfg.Websocket.ClientChanSize),
 		}
-		return fmt.Errorf("validation system error: %w", err)
-	}
+		h.logger.DebugContext(
+			ctx, "WebSocket client created",
+			"op", op,
+			"client", client,
+		)
 
-	domainMsg := domain.Message{
-		ChatID:   req.ChatID,
-		SenderID: req.SenderID,
-		Type:     req.Type,
-		Content:  req.Content,
-		Metadata: req.Metadata,
-	}
+		h.logger.InfoContext(
+			ctx, "WebSocket connection established",
+			"op", op,
+			"userID", userID,
+		)
 
-	if err := h.usecase.SaveMessage(ctx, domainMsg); err != nil {
-		//TODO: Handle errors properly (duplicate message, database errors, etc.)
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to save message")
-	}
+		// Регистрация в Хабе
+		hub.Register <- client
 
-	return c.JSON(http.StatusCreated, domainMsg)
+		// Запускаем writePump в фоне
+		go client.WritePump(c.Request().Context())
+
+		// Запускаем readPump В ТЕКУЩЕЙ горутине - блокирующий вызов
+		// Хэндлер будет висеть здесь, пока клиент не отключится.
+		client.ReadPump(c.Request().Context(), rdb)
+
+		return nil
+	}
 }
 
 // get messages/list?chat_id=xxx&anchor=xxx&limit=xxx
@@ -176,7 +199,7 @@ func (h *Handler) ListMessages(c echo.Context) error {
 	}
 
 	if req.AnchorID == "" {
-		// очень большой ULID, чтобы начать с последних сообщений, если якорь не указан
+		// очень большой, чтобы начать с последних сообщений, если якорь не указан
 		req.AnchorID = "99999999999999999999999999"
 	}
 	if req.Limit == 0 {

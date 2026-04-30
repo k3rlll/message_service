@@ -9,13 +9,9 @@ import (
 	"github.com/maypok86/otter/v2"
 )
 
-type MemoryCache[k comparable, v any] struct {
-	client *otter.Cache[k, v]
-}
-
 func NewCache[k comparable, v any](
 	cfg config.InMemoryCacheConfig,
-	logger *slog.Logger) *MemoryCache[k, v] {
+	logger *slog.Logger) *otter.Cache[k, v] {
 
 	otterLogger := NewSlogAdapter(logger)
 
@@ -30,5 +26,5 @@ func NewCache[k comparable, v any](
 
 	client := otter.Must(cacheOptions)
 
-	return &MemoryCache[k, v]{client: client}
+	return client
 }

@@ -3,14 +3,16 @@ package repository
 import (
 	"context"
 	"fmt"
-	"main/internal/models"
+
+	domain "main/internal/domain/message_entity"
+
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-func (r *MessageRepository) SaveMessage(ctx context.Context, msg *models.Message) error {
+func (r *MessageRepository) SaveMessage(ctx context.Context, msg *domain.Message) error {
 
 	_, err := r.coll.InsertOne(ctx, msg)
 	if err != nil {
@@ -26,7 +28,7 @@ func (r *MessageRepository) ListMessages(
 	ctx context.Context,
 	chatID string,
 	anchorID string,
-	limit int64) ([]models.Message, error) {
+	limit int64) ([]domain.Message, error) {
 
 	//
 
@@ -51,7 +53,7 @@ func (r *MessageRepository) ListMessages(
 
 	//
 
-	var messages []models.Message
+	var messages []domain.Message
 	if err = cur.All(ctx, &messages); err != nil {
 		return nil, fmt.Errorf("failed to decode message results: %w", err)
 	}
@@ -65,7 +67,7 @@ func (r *MessageRepository) GetMessageByText(
 	chatID string,
 	text string,
 	anchorID string,
-) ([]models.Message, error) {
+) ([]domain.Message, error) {
 
 	filter := bson.M{
 		"chat_id":    chatID,
@@ -90,7 +92,7 @@ func (r *MessageRepository) GetMessageByText(
 	}
 	defer cursor.Close(ctx)
 
-	var messages []models.Message
+	var messages []domain.Message
 
 	//
 

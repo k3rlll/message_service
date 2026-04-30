@@ -37,6 +37,7 @@ type MongoConfig struct {
 type WebsocketConfig struct {
 	CompressionThreshold int  `yaml:"compression_threshold" env-default:"512"`  // В байтах, например 512 для отключения компрессии для сообщений меньше 512 байт
 	InsecureSkipVerify   bool `yaml:"insecure_skip_verify" env-default:"false"` // В проде замените на проверку Origin!
+	ClientChanSize       int  `yaml:"client_chan_size" env-default:"256"`       // Размер буфера канала для отправки сообщений клиенту, например 256
 }
 
 type RedisConfig struct {

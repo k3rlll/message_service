@@ -6,19 +6,19 @@ import (
 )
 
 type Hub struct {
-	// users: userID -> набор его активных соединений
-	users      map[string]map[*Client]bool
-	register   chan *Client
-	unregister chan *Client
+	// users: userID - набор его активных соединений
+	Users      map[string]map[*Client]bool
+	Register   chan *Client
+	Unregister chan *Client
 	Deliver    chan DeliveryTask
 	logger     *slog.Logger
 }
 
 func NewHub(logger *slog.Logger) *Hub {
 	return &Hub{
-		users:      make(map[string]map[*Client]bool),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
+		Users:      make(map[string]map[*Client]bool),
+		Register:   make(chan *Client),
+		Unregister: make(chan *Client),
 		Deliver:    make(chan DeliveryTask),
 		logger:     logger,
 	}
@@ -38,35 +38,35 @@ func (h *Hub) Run(ctx context.Context) {
 			)
 			return
 
-		case client := <-h.register:
-			if _, ok := h.users[client.userID]; !ok {
+		case client := <-h.Register:
+			if _, ok := h.Users[client.UserID]; !ok {
 				h.logger.InfoContext(
 					ctx, "Registering new user in hub",
 					"op", op,
-					"userID", client.userID)
-				h.users[client.userID] = make(map[*Client]bool)
+					"userID", client.UserID)
+				h.Users[client.UserID] = make(map[*Client]bool)
 			}
-			h.users[client.userID][client] = true
+			h.Users[client.UserID][client] = true
 
-		case client := <-h.unregister:
-			if connections, ok := h.users[client.userID]; ok {
+		case client := <-h.Unregister:
+			if connections, ok := h.Users[client.UserID]; ok {
 				if _, exists := connections[client]; exists {
 					delete(connections, client)
-					close(client.send)
+					close(client.Send)
 
 					if len(connections) == 0 {
 						h.logger.InfoContext(
 							ctx, "No more active connections for user, removing from hub",
 							"op", op,
-							"userID", client.userID)
-						delete(h.users, client.userID)
+							"userID", client.UserID)
+						delete(h.Users, client.UserID)
 					}
 
 				}
 			}
 		case task := <-h.Deliver:
 			for _, userID := range task.TargetUserIDs {
-				connections, ok := h.users[userID]
+				connections, ok := h.Users[userID]
 				if !ok {
 					h.logger.DebugContext(
 						ctx, "User is offline, skipping delivery",
@@ -78,11 +78,11 @@ func (h *Hub) Run(ctx context.Context) {
 
 				for client := range connections {
 					select {
-					case client.send <- task.Payload:
+					case client.Send <- task.Payload:
 						h.logger.DebugContext(
 							ctx, "Delivered message to client",
 							"op", op,
-							"userID", client.userID,
+							"userID", client.UserID,
 						)
 						// Сообщение успешно поставлено в канал отправки клиента
 					default:
@@ -91,13 +91,13 @@ func (h *Hub) Run(ctx context.Context) {
 						h.logger.DebugContext(
 							ctx, "Slow client detected, disconnecting",
 							"op", op,
-							"userID", client.userID,
+							"userID", client.UserID,
 						)
 
-						close(client.send)
+						close(client.Send)
 						delete(connections, client)
 						if len(connections) == 0 {
-							delete(h.users, client.userID)
+							delete(h.Users, client.UserID)
 						}
 					}
 				}

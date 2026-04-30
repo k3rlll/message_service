@@ -3,8 +3,8 @@ package ws
 import "time"
 
 type IncomingMessage struct {
-	ChatID string `json:"chat_id"`
-	Text   string `json:"text"`
+	ChatID string `json:"chat_id" validate:"required,ulid"`
+	Text   string `json:"text" validate:"required"`
 }
 
 // OutgoingMessage шлем клиенту уже обогащенное

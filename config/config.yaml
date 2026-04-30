@@ -7,6 +7,7 @@ mongo:
 websocket:
   compression_threshold: 512 # В байтах, например 512 для отключения компрессии для сообщений меньше 512 байт
   insecure_skip_verify: true # В проде замените на проверку Origin!
+  client_chan_size: 256 # Размер буфера канала для отправки сообщений клиенту, например 256
 
 
 jwt:
