@@ -1,9 +1,14 @@
 package message_entity
 
 import (
+	"errors"
 	"time"
 )
 
+var (
+	ErrMessageTooLarge   = errors.New("message is too large for storage")
+	ErrPersistenceFailed = errors.New("could not save message to database")
+)
 
 type Message struct {
 	ID        string         `bson:"_id,omitempty"`

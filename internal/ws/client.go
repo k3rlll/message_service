@@ -3,10 +3,13 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"syscall"
 	"time"
+
+	domainChat "main/internal/domain/chat_entity"
 
 	"github.com/coder/websocket"
 	"github.com/go-redis/redis/v8"
@@ -107,7 +110,26 @@ func (c *Client) ReadPump(ctx context.Context, rdb *redis.Client) {
 		}
 
 		isUserInChat, err := c.Cache.IsUserInChat(ctx, c.UserID, incoming.ChatID)
+		//TODO: Handle errors properly
 		if err != nil {
+			if errors.Is(err, domainChat.ErrAccessDenied) {
+				c.logger.InfoContext(
+					ctx, "User is not a member of the chat",
+					"op", op,
+					"userID", c.UserID,
+					"chatID", incoming.ChatID,
+				)
+				continue
+			}
+			if errors.Is(err, domainChat.ErrChatNotFound) {
+				c.logger.InfoContext(
+					ctx, "Chat not found",
+					"op", op,
+					"userID", c.UserID,
+					"chatID", incoming.ChatID,
+				)
+				continue
+			}
 			c.logger.ErrorContext(
 				ctx, "Error checking if user is in chat",
 				"op", op,
@@ -115,6 +137,7 @@ func (c *Client) ReadPump(ctx context.Context, rdb *redis.Client) {
 				"chatID", incoming.ChatID,
 				"error", err,
 			)
+
 			continue
 		}
 		if !isUserInChat {
@@ -128,8 +151,12 @@ func (c *Client) ReadPump(ctx context.Context, rdb *redis.Client) {
 		}
 
 		// Сохраняем сообщение в БД, получаем ID и дату создания
-
-		messageID, createdAt, err := c.MessageUsecase.SaveMessage(ctx, incoming.ChatID, c.UserID, incoming.Text)
+		messageID, createdAt, err := c.MessageUsecase.SaveMessage(
+			ctx,
+			incoming.ChatID,
+			c.UserID,
+			incoming.Text)
+		//TODO: Handle errors properly
 		if err != nil {
 			c.logger.ErrorContext(
 				ctx, "Error saving message",
@@ -166,12 +193,12 @@ func (c *Client) ReadPump(ctx context.Context, rdb *redis.Client) {
 	}
 }
 
-// writePump читает сообщения из канала send и отправляет их клиенту
+// writePump читает сообщения из Redis канала send и отправляет их клиенту
 func (c *Client) WritePump(ctx context.Context) {
 	op := "Client.writePump"
 	c.logger.InfoContext(ctx, "Starting write pump for client", "op", op, "userID", c.UserID)
 
-	// Определяем частоту отправки ping сообщений чтобы поддерживать соединение живым.
+	// Определяем частоту отправки ping сообщений чтобы поддерживать соединение живым
 	ticker := time.NewTicker(timeTicker * time.Second)
 
 	defer func() {

@@ -1,7 +1,14 @@
 package chat_entity
 
 import (
+	"errors"
 	"time"
+)
+
+var (
+	ErrChatNotFound = errors.New("chat not found")
+	ErrAccessDenied = errors.New("access denied: user is not a member of this chat")
+	ErrUserBanned   = errors.New("user is banned in this chat")
 )
 
 type Chat struct {

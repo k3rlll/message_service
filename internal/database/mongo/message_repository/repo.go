@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -14,18 +15,21 @@ var (
 )
 
 type MessageRepository struct {
-	coll *mongo.Collection
+	coll   *mongo.Collection
+	logger *slog.Logger
 }
 
-func NewMessageRepository(db *mongo.Database) *MessageRepository {
+func NewMessageRepository(db *mongo.Database, logger *slog.Logger) *MessageRepository {
 	return &MessageRepository{
-		coll: db.Collection(messagesCollection),
+		coll:   db.Collection(messagesCollection),
+		logger: logger,
 	}
 }
 
 // create indexes to speed up operations
 func (r *MessageRepository) EnsureIndexes(ctx context.Context) error {
 	//
+	const op = "MessageRepository.EnsureIndexes"
 
 	indexModel := mongo.IndexModel{
 		Keys: bson.D{
@@ -41,7 +45,16 @@ func (r *MessageRepository) EnsureIndexes(ctx context.Context) error {
 
 	_, err := r.coll.Indexes().CreateOne(ctx, indexModel)
 	if err != nil {
+		r.logger.ErrorContext(
+			ctx,
+			"op", op,
+			"failed to create indexes for messages collection",
+			slog.String("error", err.Error()))
 		return fmt.Errorf("failed to create indexes for messages collection: %w", err)
 	}
+
+	r.logger.DebugContext(
+		ctx, "op", op,
+		"indexes created successfully for messages collection")
 	return nil
 }
