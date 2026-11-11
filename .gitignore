@@ -1,0 +1,13 @@
+# Секреты
+.env
+/keys/
+
+# IDE
+.idea/
+.vscode/
+
+# Данные и артефакты сборки
+/out/
+/data/
+/bin/
+*.exe

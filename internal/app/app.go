@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 
-	msgHandlers "main/internal/transport/http/message_handlers"
 	mddlwr "main/internal/transport/middleware"
 	errHandler "main/pkg/error_handler"
 
@@ -23,11 +22,7 @@ func (cv *CustomValidator) Validate(i interface{}) error {
 
 // NewServer собирает Echo: middleware, обработчик ошибок и маршруты.
 // Сам сервер не запускает.
-func NewServer(
-	logger *slog.Logger,
-	handlerMsg *msgHandlers.Handler,
-	verifier mddlwr.TokenVerifier,
-) *echo.Echo {
+func NewServer(logger *slog.Logger, handlers Handlers, deps RouteDeps) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -84,7 +79,7 @@ func NewServer(
 		},
 	}))
 
-	MapRoutes(e, handlerMsg, verifier)
+	MapRoutes(e, handlers, deps)
 
 	return e
 }

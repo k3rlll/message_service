@@ -13,15 +13,23 @@ import (
 	"syscall"
 
 	"main/internal/app"
-	pubsub "main/internal/broker/redis_pub_sub"
+	events "main/internal/broker/redis_events"
 	"main/internal/cache"
 	"main/internal/configs"
 	"main/internal/database/mongo"
 	chatRepo "main/internal/database/mongo/chat_repository"
 	msgRepo "main/internal/database/mongo/message_repository"
+	"main/internal/presence"
+	"main/internal/ratelimit"
+	"main/internal/storage/s3"
+	chatHandlers "main/internal/transport/http/chat_handlers"
 	msgHandlers "main/internal/transport/http/message_handlers"
+	wsHandler "main/internal/transport/http/ws_handler"
+	attachUC "main/internal/usecase/attachment_usecase"
 	cacheUC "main/internal/usecase/cache_usecase"
+	chatUC "main/internal/usecase/chat_usecase"
 	msgUC "main/internal/usecase/message_usecase"
+	presenceUC "main/internal/usecase/presence_usecase"
 	"main/internal/ws"
 	"main/pkg/jwt"
 	stplog "main/pkg/logger"
@@ -57,10 +65,10 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// MongoDB
 	initCtx, cancelInit := context.WithTimeout(ctx, cfg.Mongo.InitializationTimeout)
 	defer cancelInit()
 
+	// MongoDB
 	mongoClient, err := mongo.ConnectMongoDB(initCtx, cfg.Mongo)
 	if err != nil {
 		return err
@@ -82,6 +90,9 @@ func run() error {
 		return err
 	}
 	chatRepository := chatRepo.NewChatRepository(db, logger)
+	if err := chatRepository.EnsureIndexes(initCtx); err != nil {
+		return err
+	}
 
 	// Redis
 	redisClient := redis.NewClient(&redis.Options{
@@ -95,17 +106,46 @@ func run() error {
 		return fmt.Errorf("ping Redis: %w", err)
 	}
 
+	// Объектное хранилище вложений - необязательное
+	var storage attachUC.Storage
+	if cfg.S3.Enabled() {
+		s3Storage, err := s3.New(initCtx, cfg.S3)
+		if err != nil {
+			return err
+		}
+		storage = s3Storage
+	} else {
+		logger.Warn("S3_ENDPOINT is not set, attachments are disabled")
+	}
+
 	// Зависимости
 	membersCache := cacheUC.NewInMemoryCache(
 		cache.NewCache[string, cacheUC.ChatMembers](cfg.InMemoryCache, logger),
 		logger,
 		chatRepository,
 	)
-	broker := pubsub.NewPubSub(redisClient, logger)
-	messageUsecase := msgUC.NewUsecase(messageRepo, membersCache, broker, logger)
+	eventBus := events.NewEventBus(redisClient, membersCache, logger, events.Config{
+		StreamMaxLen: cfg.Events.StreamMaxLen,
+		ReplayLimit:  cfg.Events.ReplayLimit,
+	})
+	limiter := ratelimit.NewLimiter(redisClient)
+
+	attachmentUsecase := attachUC.NewUsecase(storage, membersCache, attachUC.Config{
+		UploadURLTTL:   cfg.S3.UploadURLTTL,
+		DownloadURLTTL: cfg.S3.DownloadURLTTL,
+		MaxFileSize:    cfg.S3.MaxFileSize,
+	})
+	messageUsecase := msgUC.NewUsecase(
+		messageRepo, chatRepository, membersCache, eventBus,
+		attachmentUsecase, limiter, cfg.RateLimit.Messages, logger)
+	chatUsecase := chatUC.NewUsecase(chatRepository, messageRepo, membersCache, eventBus, logger)
+	presenceUsecase := presenceUC.NewUsecase(
+		presence.NewStore(redisClient, cfg.Presence.TTL, cfg.Presence.TypingTTL),
+		chatRepository, membersCache, eventBus, logger)
+
 	hub := ws.NewHub(logger)
 
-	// Фоновые воркеры: Хаб и подписчик Redis
+	// Фоновые воркеры: Хаб и чтение событий из Redis
 	var workers sync.WaitGroup
 	workers.Add(2)
 	go func() {
@@ -114,12 +154,32 @@ func run() error {
 	}()
 	go func() {
 		defer workers.Done()
-		broker.RunSubscriber(ctx, membersCache, hub)
+		eventBus.Run(ctx, hub)
 	}()
 
+	// Принимаем клиентов только когда шина готова, иначе первые события потеряются
+	if err := eventBus.WaitReady(initCtx); err != nil {
+		stop()
+		workers.Wait()
+		return fmt.Errorf("event bus is not ready: %w", err)
+	}
+
 	// HTTP сервер
-	handler := msgHandlers.NewHandler(logger, messageUsecase, hub, cfg.Websocket)
-	server := app.NewServer(logger, handler, tokenVerifier)
+	server := app.NewServer(logger,
+		app.Handlers{
+			Messages: msgHandlers.NewHandler(logger, messageUsecase),
+			Chats:    chatHandlers.NewHandler(logger, chatUsecase, presenceUsecase, attachmentUsecase),
+			WS: wsHandler.NewHandler(logger, hub,
+				wsHandler.NewBackend(messageUsecase, chatUsecase, presenceUsecase, eventBus),
+				cfg.Websocket),
+		},
+		app.RouteDeps{
+			Verifier: tokenVerifier,
+			Limiter:  limiter,
+			HTTPRule: cfg.RateLimit.HTTP,
+			Logger:   logger,
+		},
+	)
 
 	serverErr := make(chan error, 1)
 	go func() {

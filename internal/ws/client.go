@@ -206,6 +206,8 @@ func (c *Client) readPump() {
 			status := websocket.CloseStatus(err)
 			expected := status == websocket.StatusNormalClosure ||
 				status == websocket.StatusGoingAway ||
+				// Браузерный ws.close() без аргументов закрывает соединение без кода
+				status == websocket.StatusNoStatusRcvd ||
 				c.ctx.Err() != nil
 
 			if !expected {

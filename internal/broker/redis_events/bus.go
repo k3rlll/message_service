@@ -59,6 +59,10 @@ type EventBus struct {
 	members MembersProvider
 	logger  *slog.Logger
 	cfg     Config
+
+	// Закрываются, когда читатели готовы принимать события
+	streamReady    chan struct{}
+	ephemeralReady chan struct{}
 }
 
 func NewEventBus(
@@ -71,7 +75,24 @@ func NewEventBus(
 		members: members,
 		logger:  logger,
 		cfg:     cfg,
+
+		streamReady:    make(chan struct{}),
+		ephemeralReady: make(chan struct{}),
 	}
+}
+
+// WaitReady ждет, пока Run начнет принимать события.
+// События, опубликованные раньше, этим экземпляром не будут доставлены вживую
+// (клиенты получат долговечные события при догрузке).
+func (b *EventBus) WaitReady(ctx context.Context) error {
+	for _, ready := range []chan struct{}{b.streamReady, b.ephemeralReady} {
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 // wireEvent - событие в том виде, в каком оно лежит в Redis
@@ -188,6 +209,7 @@ func (b *EventBus) runStream(ctx context.Context, deliverer Deliverer) {
 	}
 
 	b.logger.InfoContext(ctx, "Stream reader started", "op", op, "from", lastID)
+	close(b.streamReady)
 
 	for ctx.Err() == nil {
 		streams, err := b.client.XRead(ctx, &redis.XReadArgs{
@@ -239,6 +261,15 @@ func (b *EventBus) runEphemeral(ctx context.Context, deliverer Deliverer) {
 
 	pubsub := b.client.Subscribe(ctx, ephemeralChannel)
 	defer pubsub.Close()
+
+	// Subscribe не ждет подтверждения от Redis, Receive - ждет
+	if _, err := pubsub.Receive(ctx); err != nil {
+		if ctx.Err() == nil {
+			b.logger.ErrorContext(ctx, "Failed to subscribe to ephemeral events", "op", op, "error", err)
+		}
+		return
+	}
+	close(b.ephemeralReady)
 
 	ch := pubsub.Channel()
 
