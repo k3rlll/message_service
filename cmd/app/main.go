@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"main/internal/app"
 	events "main/internal/broker/redis_events"
@@ -52,7 +53,11 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	logger := stplog.SetupLogger(cfg.Environment)
+	// Имя экземпляра: в docker это ID контейнера. Видно в логах, заголовке X-Instance
+	// и кадре connected - так проще показать, что запросы расходятся по экземплярам.
+	instance, _ := os.Hostname()
+
+	logger := stplog.SetupLogger(cfg.Environment).With("instance", instance)
 
 	// Публичный ключ сервиса авторизации. Для локальной разработки
 	// пару ключей и токен выдает go run ./cmd/devtoken
@@ -171,23 +176,42 @@ func run() error {
 			Chats:    chatHandlers.NewHandler(logger, chatUsecase, presenceUsecase, attachmentUsecase),
 			WS: wsHandler.NewHandler(logger, hub,
 				wsHandler.NewBackend(messageUsecase, chatUsecase, presenceUsecase, eventBus),
-				cfg.Websocket),
+				cfg.Websocket, instance),
 		},
 		app.RouteDeps{
 			Verifier: tokenVerifier,
 			Limiter:  limiter,
 			HTTPRule: cfg.RateLimit.HTTP,
 			Logger:   logger,
+			Instance: instance,
 		},
 	)
 
-	serverErr := make(chan error, 1)
+	// Служебный сервер: метрики и пробы здоровья
+	admin := app.NewAdmin(map[string]app.Check{
+		"mongo": func(ctx context.Context) error { return mongoClient.Ping(ctx, readpref.Primary()) },
+		"redis": func(ctx context.Context) error { return redisClient.Ping(ctx).Err() },
+	})
+	adminServer := &http.Server{
+		Addr:              net.JoinHostPort(cfg.Server.Host, cfg.Server.AdminPort),
+		Handler:           admin.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	serverErr := make(chan error, 2)
 	go func() {
 		addr := net.JoinHostPort(cfg.Server.Host, cfg.Server.Port)
 		logger.Info("Starting message service", "addr", addr)
 
 		if err := server.Start(addr); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
+		}
+	}()
+	go func() {
+		logger.Info("Starting admin server", "addr", adminServer.Addr)
+
+		if err := adminServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- fmt.Errorf("admin server: %w", err)
 		}
 	}()
 
@@ -200,6 +224,9 @@ func run() error {
 		logger.Info("Shutdown signal received")
 	}
 
+	// Балансировщик должен перестать слать новые запросы раньше, чем мы закроем соединения
+	admin.Drain()
+
 	// Сначала ждем остановки Хаба: он закрывает WebSocket соединения.
 	// Shutdown их не закрывает и ждал бы до таймаута.
 	workers.Wait()
@@ -209,6 +236,9 @@ func run() error {
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown server: %w", err)
+	}
+	if err := adminServer.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown admin server: %w", err)
 	}
 
 	logger.Info("Service stopped gracefully")

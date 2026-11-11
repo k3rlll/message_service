@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"main/internal/metrics"
 	"main/internal/ratelimit"
 	errHandler "main/pkg/error_handler"
 
@@ -40,6 +41,7 @@ func RateLimitMiddleware(limiter RateLimiter, rule ratelimit.Rule, logger *slog.
 			}
 
 			if !result.Allowed {
+				metrics.RateLimited.WithLabelValues("http").Inc()
 				retryAfter := int(math.Ceil(result.RetryAfter.Seconds()))
 				c.Response().Header().Set("Retry-After", strconv.Itoa(max(retryAfter, 1)))
 

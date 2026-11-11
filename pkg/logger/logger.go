@@ -3,8 +3,9 @@ package logger
 import (
 	"context"
 	"log/slog"
-	"main/pkg/ctxutils"
 	"os"
+
+	"main/pkg/ctxutils"
 )
 
 type ContextHandler struct {
@@ -38,7 +39,6 @@ func SetupLogger(env string) *slog.Logger {
 	default:
 		baseHandler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 	}
-
 
 	ctxHandler := ContextHandler{Handler: baseHandler}
 

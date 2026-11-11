@@ -13,6 +13,7 @@ import (
 	domainChat "main/internal/domain/chat_entity"
 	domainEvent "main/internal/domain/event_entity"
 	domain "main/internal/domain/message_entity"
+	"main/internal/metrics"
 	"main/internal/ratelimit"
 
 	"github.com/oklog/ulid/v2"
@@ -170,11 +171,13 @@ func (u *MessageUsecase) SendMessage(
 		if err != nil {
 			return nil, false, fmt.Errorf("%s: %w", op, err)
 		}
+		metrics.MessagesDeduplicated.Inc()
 		return existing, false, nil
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("%s: %w", op, err)
 	}
+	metrics.MessagesSent.WithLabelValues(msg.Type).Inc()
 
 	// Сообщение уже сохранено, поэтому сбои ниже не считаем ошибкой запроса:
 	// получатели увидят сообщение при следующей загрузке истории
@@ -396,6 +399,7 @@ func (u *MessageUsecase) checkSendRate(ctx context.Context, userID string) error
 		return nil
 	}
 	if !result.Allowed {
+		metrics.RateLimited.WithLabelValues("messages").Inc()
 		return domainComm.ErrRateLimited
 	}
 	return nil

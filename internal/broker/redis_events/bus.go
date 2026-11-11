@@ -19,6 +19,7 @@ import (
 
 	domainChat "main/internal/domain/chat_entity"
 	domainEvent "main/internal/domain/event_entity"
+	"main/internal/metrics"
 	ws "main/internal/ws"
 
 	"github.com/redis/go-redis/v9"
@@ -135,8 +136,11 @@ func (w wireEvent) frame(id string) []byte {
 }
 
 // Publish записывает долговечное событие в поток
-func (b *EventBus) Publish(ctx context.Context, event domainEvent.Event) error {
+func (b *EventBus) Publish(ctx context.Context, event domainEvent.Event) (err error) {
 	const op = "EventBus.Publish"
+	defer func() {
+		metrics.EventsPublished.WithLabelValues(event.Type, "durable", metrics.Result(err)).Inc()
+	}()
 
 	data, err := encode(event)
 	if err != nil {
@@ -156,8 +160,11 @@ func (b *EventBus) Publish(ctx context.Context, event domainEvent.Event) error {
 }
 
 // PublishEphemeral рассылает событие, которое не нужно хранить
-func (b *EventBus) PublishEphemeral(ctx context.Context, event domainEvent.Event) error {
+func (b *EventBus) PublishEphemeral(ctx context.Context, event domainEvent.Event) (err error) {
 	const op = "EventBus.PublishEphemeral"
+	defer func() {
+		metrics.EventsPublished.WithLabelValues(event.Type, "ephemeral", metrics.Result(err)).Inc()
+	}()
 
 	data, err := encode(event)
 	if err != nil {

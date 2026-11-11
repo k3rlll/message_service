@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Message Service Demo</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1d2129; --muted: #6b7280; --line: #e3e6ea;
+    --accent: #2f6fed; --accent-text: #ffffff; --mine: #dbe7ff; --theirs: #ffffff;
+    --danger: #c0392b; --ok: #1e9e5a; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --panel: #1c1f24; --text: #e6e8eb; --muted: #9aa1ab; --line: #2c3037;
+      --accent: #5b8cff; --accent-text: #0b0d10; --mine: #24365e; --theirs: #23272e;
+      --danger: #ff6b5b; --ok: #3ccf86; --chip: #2a2e35;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 6px 10px; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.link { border: none; background: none; padding: 0 4px; color: var(--muted); }
+  input { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 7px 9px; width: 100%; }
+  header { display: flex; gap: 10px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  header .token { flex: 1 1 260px; }
+  .status { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; }
+  .dot.on { background: var(--ok); }
+  main { display: grid; grid-template-columns: 300px 1fr; height: calc(100vh - 57px); }
+  aside { border-right: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+  .new-chat { padding: 10px; border-bottom: 1px solid var(--line); display: grid; gap: 6px; }
+  .new-chat .row { display: flex; gap: 6px; }
+  .chats { overflow-y: auto; flex: 1; }
+  .chat-item { padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer; display: grid; gap: 2px; }
+  .chat-item:hover { background: var(--chip); }
+  .chat-item.active { background: var(--mine); }
+  .chat-item .top { display: flex; justify-content: space-between; gap: 8px; }
+  .chat-item .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-item .preview { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { background: var(--accent); color: var(--accent-text); border-radius: 10px; padding: 0 7px; font-size: 12px; }
+  section.chat { display: flex; flex-direction: column; min-height: 0; }
+  .chat-head { padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .chat-head .title { font-weight: 600; margin-right: auto; }
+  .members { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { background: var(--chip); border-radius: 12px; padding: 2px 8px; font-size: 12px; display: inline-flex; gap: 5px; align-items: center; }
+  .messages { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 6px; }
+  .msg { max-width: 70%; padding: 6px 10px; border-radius: 10px; background: var(--theirs); border: 1px solid var(--line); align-self: flex-start; }
+  .msg.mine { align-self: flex-end; background: var(--mine); }
+  .msg .meta { font-size: 11px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  .msg .text { white-space: pre-wrap; word-break: break-word; }
+  .msg.deleted .text { font-style: italic; color: var(--muted); }
+  .msg .reactions { display: flex; gap: 4px; margin-top: 3px; }
+  .typing { height: 20px; padding: 0 16px; font-size: 12px; color: var(--muted); }
+  .composer { display: flex; gap: 8px; padding: 10px 16px; background: var(--panel); border-top: 1px solid var(--line); }
+  .empty { margin: auto; color: var(--muted); text-align: center; padding: 20px; }
+  .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--danger); color: #fff; padding: 8px 14px; border-radius: 8px; display: none; max-width: 90vw; }
+  .me { font-family: ui-monospace, monospace; font-size: 12px; }
+  @media (max-width: 720px) {
+    main { grid-template-columns: 1fr; height: auto; }
+    aside { max-height: 40vh; }
+    section.chat { height: 70vh; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Message Service</h1>
+  <input class="token" id="token" placeholder="JWT access token (go run ./cmd/devtoken)">
+  <button class="primary" id="connect">Подключиться</button>
+  <div class="status"><span class="dot" id="ws-dot"></span><span id="ws-status">не подключено</span></div>
+  <div class="status">я: <span class="me" id="me">—</span><button class="link" id="copy-me" title="Скопировать ID">⧉</button></div>
+  <a class="status" href="/docs" target="_blank">API docs</a>
+</header>
+<main>
+  <aside>
+    <div class="new-chat">
+      <input id="new-name" placeholder="Название группы">
+      <input id="new-members" placeholder="ID участников через запятую">
+      <div class="row">
+        <button id="create-group">Создать группу</button>
+        <button id="create-direct" title="Личный чат с первым ID из списка">Личный чат</button>
+      </div>
+    </div>
+    <div class="chats" id="chats"></div>
+  </aside>
+  <section class="chat" id="chat-view">
+    <div class="empty" id="no-chat">Вставьте токен, подключитесь и выберите чат</div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+
+const state = {
+  token: '', me: '', ws: null, lastEventId: store.get('lastEventId') || '',
+  chats: new Map(),      // id -> chat summary
+  active: null,          // id открытого чата
+  messages: new Map(),   // id -> message (открытого чата)
+  hasMore: false,
+  online: {},            // userId -> bool
+  typing: new Map(),     // userId -> timer
+  seenEvents: new Set(), // для отбрасывания дубликатов событий
+  reconnectDelay: 1000,
+};
+
+const short = (id) => id ? '…' + id.slice(-6) : '';
+const name = (id) => id === state.me ? 'я' : short(id);
+const time = (s) => new Date(s).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+function toast(text) {
+  const t = $('toast');
+  t.textContent = text; t.style.display = 'block';
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => (t.style.display = 'none'), 4000);
+}
+
+function decodeSub(token) {
+  try { return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub || ''; }
+  catch { return ''; }
+}
+
+async function api(method, path, body) {
+  const res = await fetch('/api/v1' + path, {
+    method,
+    headers: { Authorization: 'Bearer ' + state.token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = res.status === 204 ? null : await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = data?.error?.message || res.statusText;
+    toast(`${res.status}: ${msg}`);
+    throw new Error(msg);
+  }
+  return data;
+}
+
+// ---------- Чаты ----------
+
+function chatTitle(chat) {
+  if (chat.type === 'group') return chat.name;
+  const other = chat.members.find((m) => m.user_id !== state.me);
+  return 'Личный: ' + short(other?.user_id);
+}
+
+function renderChats() {
+  const list = [...state.chats.values()].sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+  const root = $('chats');
+  root.replaceChildren(...list.map((chat) => {
+    const el = document.createElement('div');
+    el.className = 'chat-item' + (chat.id === state.active ? ' active' : '');
+    el.onclick = () => openChat(chat.id);
+    const last = chat.last_message;
+    const preview = !last ? 'нет сообщений' : last.is_deleted ? 'сообщение удалено' : `${name(last.sender_id)}: ${last.content || '📎 вложение'}`;
+    el.innerHTML = '<div class="top"><span class="name"></span><span></span></div><div class="preview"></div>';
+    el.querySelector('.name').textContent = chatTitle(chat);
+    el.querySelector('.preview').textContent = preview;
+    if (chat.unread_count > 0 && chat.id !== state.active) {
+      const b = document.createElement('span');
+      b.className = 'badge'; b.textContent = chat.unread_count >= 100 ? '99+' : chat.unread_count;
+      el.querySelector('.top span:last-child').append(b);
+    }
+    return el;
+  }));
+}
+
+async function loadChats() {
+  const data = await api('GET', '/chats?limit=100');
+  state.chats = new Map(data.chats.map((c) => [c.id, c]));
+  renderChats();
+  if (state.active && !state.chats.has(state.active)) closeChat();
+}
+
+async function refreshChat(chatId) {
+  const chat = await api('GET', '/chats/' + chatId);
+  state.chats.set(chatId, chat);
+  renderChats();
+  if (chatId === state.active) renderHeader();
+}
+
+// ---------- Открытый чат ----------
+
+function closeChat() {
+  state.active = null;
+  $('chat-view').replaceChildren($('no-chat') || Object.assign(document.createElement('div'), { className: 'empty', id: 'no-chat', textContent: 'Выберите чат' }));
+}
+
+async function openChat(chatId) {
+  state.active = chatId;
+  state.messages = new Map();
+  const view = $('chat-view');
+  view.innerHTML = `
+    <div class="chat-head"><span class="title" id="chat-title"></span><div class="members" id="members"></div>
+      <button id="add-member">+ участник</button><button id="leave">Выйти</button></div>
+    <div class="messages" id="messages"></div>
+    <div class="typing" id="typing"></div>
+    <form class="composer" id="composer"><input id="text" placeholder="Сообщение" autocomplete="off"><button class="primary">Отправить</button></form>`;
+  $('composer').onsubmit = (e) => { e.preventDefault(); sendMessage(); };
+  $('text').oninput = () => throttleTyping();
+  $('add-member').onclick = addMember;
+  $('leave').onclick = leaveChat;
+
+  await refreshChat(chatId);
+  const presence = await api('GET', `/chats/${chatId}/presence`);
+  Object.assign(state.online, presence.online);
+  renderHeader();
+  await loadMessages();
+  markRead();
+}
+
+function renderHeader() {
+  const chat = state.chats.get(state.active);
+  if (!chat || !$('chat-title')) return;
+  $('chat-title').textContent = chatTitle(chat);
+  $('members').replaceChildren(...chat.members.map((m) => {
+    const c = document.createElement('span');
+    c.className = 'chip';
+    c.title = m.user_id + ' (' + m.role + ')';
+    c.innerHTML = `<span class="dot ${state.online[m.user_id] ? 'on' : ''}"></span><span></span>`;
+    c.lastChild.textContent = name(m.user_id) + (m.role !== 'member' ? ' · ' + m.role : '');
+    return c;
+  }));
+  $('add-member').style.display = chat.type === 'group' ? '' : 'none';
+  $('leave').style.display = chat.type === 'group' ? '' : 'none';
+  renderMessages(false);
+}
+
+async function loadMessages(older = false) {
+  const chatId = state.active;
+  let query = `/messages?chat_id=${chatId}&limit=30`;
+  if (older) query += '&anchor=' + [...state.messages.keys()].sort()[0];
+  const data = await api('GET', query);
+  if (chatId !== state.active) return;
+  for (const m of data.messages) state.messages.set(m.id, m);
+  state.hasMore = data.has_more;
+  renderMessages(!older);
+}
+
+// Прочитано ли мое сообщение кем-то из собеседников
+function readBy(msg) {
+  const chat = state.chats.get(state.active);
+  return chat ? chat.members.some((m) => m.user_id !== state.me && (m.last_read_message_id || '') >= msg.id) : false;
+}
+
+function renderMessages(scrollDown) {
+  const root = $('messages');
+  if (!root) return;
+  const atBottom = root.scrollHeight - root.scrollTop - root.clientHeight < 40;
+  const items = [];
+  if (state.hasMore) {
+    const more = document.createElement('button');
+    more.textContent = 'Загрузить раньше'; more.style.alignSelf = 'center';
+    more.onclick = () => loadMessages(true);
+    items.push(more);
+  }
+  for (const m of [...state.messages.values()].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    const el = document.createElement('div');
+    const mine = m.sender_id === state.me;
+    el.className = 'msg' + (mine ? ' mine' : '') + (m.deleted_at ? ' deleted' : '');
+    el.innerHTML = '<div class="meta"></div><div class="text"></div><div class="reactions"></div>';
+    const meta = el.querySelector('.meta');
+    meta.textContent = `${name(m.sender_id)} · ${time(m.created_at)}${m.is_edited ? ' · изменено' : ''}`;
+    if (mine && !m.deleted_at) meta.append(readBy(m) ? ' ✓✓' : ' ✓');
+    el.querySelector('.text').textContent = m.deleted_at ? 'сообщение удалено'
+      : m.content || (m.attachments || []).map((a) => '📎 ' + a.name).join(', ');
+    if (!m.deleted_at) {
+      const counts = {};
+      for (const r of m.reactions || []) counts[r.emoji] = (counts[r.emoji] || 0) + 1;
+      const box = el.querySelector('.reactions');
+      for (const [emoji, n] of Object.entries(counts)) {
+        const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = `${emoji} ${n}`;
+        box.append(chip);
+      }
+      const like = document.createElement('button'); like.className = 'link'; like.textContent = '👍';
+      like.title = 'Поставить или убрать 👍';
+      like.onclick = () => toggleReaction(m, '👍');
+      meta.append(like);
+      if (mine) {
+        const del = document.createElement('button'); del.className = 'link'; del.textContent = '✕';
+        del.title = 'Удалить'; del.onclick = () => deleteMessage(m.id);
+        meta.append(del);
+      }
+    }
+    items.push(el);
+  }
+  if (!items.length) items.push(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'Сообщений пока нет' }));
+  root.replaceChildren(...items);
+  if (scrollDown || atBottom) root.scrollTop = root.scrollHeight;
+}
+
+function sendMessage() {
+  const input = $('text');
+  const text = input.value.trim();
+  if (!text || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  // client_msg_id защищает от дубликатов при повторной отправке после обрыва связи
+  state.ws.send(JSON.stringify({
+    type: 'message.send', ref: crypto.randomUUID(),
+    payload: { chat_id: state.active, text, client_msg_id: crypto.randomUUID() },
+  }));
+  input.value = '';
+}
+
+function throttleTyping() {
+  const now = Date.now();
+  if (now - (throttleTyping.last || 0) < 2000 || !state.ws) return;
+  throttleTyping.last = now;
+  state.ws.send(JSON.stringify({ type: 'typing', payload: { chat_id: state.active } }));
+}
+
+function markRead() {
+  const ids = [...state.messages.keys()].sort();
+  const last = ids[ids.length - 1];
+  if (!last || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  const chat = state.chats.get(state.active);
+  const me = chat?.members.find((m) => m.user_id === state.me);
+  if (me && (me.last_read_message_id || '') >= last) return;
+  state.ws.send(JSON.stringify({ type: 'chat.read', ref: 'read', payload: { chat_id: state.active, message_id: last } }));
+  if (chat) { chat.unread_count = 0; renderChats(); }
+}
+
+async function toggleReaction(m, emoji) {
+  const mine = (m.reactions || []).some((r) => r.user_id === state.me && r.emoji === emoji);
+  const updated = mine
+    ? await api('DELETE', `/messages/${m.id}/reactions?chat_id=${m.chat_id}&emoji=${encodeURIComponent(emoji)}`)
+    : await api('PUT', `/messages/${m.id}/reactions`, { chat_id: m.chat_id, emoji });
+  state.messages.set(updated.id, updated);
+  renderMessages(false);
+}
+
+async function deleteMessage(id) {
+  await api('DELETE', `/messages?chat_id=${state.active}&message_ids=${id}`);
+}
+
+async function addMember() {
+  const userId = prompt('ID пользователя');
+  if (userId) await api('POST', `/chats/${state.active}/members`, { user_id: userId.trim() });
+}
+
+async function leaveChat() {
+  if (confirm('Выйти из чата?')) await api('DELETE', `/chats/${state.active}/members/${state.me}`);
+}
+
+// ---------- WebSocket ----------
+
+function connect() {
+  state.token = $('token').value.trim();
+  state.me = decodeSub(state.token);
+  if (!state.me) { toast('Не удалось прочитать sub из токена'); return; }
+  store.set('token', state.token);
+  $('me').textContent = state.me;
+  if (state.ws) { state.ws.onclose = null; state.ws.close(); }
+  openSocket();
+}
+
+function setStatus(text, on) {
+  $('ws-status').textContent = text;
+  $('ws-dot').classList.toggle('on', on);
+}
+
+function openSocket() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const q = new URLSearchParams({ token: state.token });
+  if (state.lastEventId) q.set('last_event_id', state.lastEventId);
+  const ws = new WebSocket(`${proto}//${location.host}/api/v1/ws?${q}`);
+  state.ws = ws;
+  setStatus('подключение…', false);
+
+  ws.onmessage = (e) => handleFrame(JSON.parse(e.data));
+  ws.onclose = () => {
+    setStatus(`переподключение через ${state.reconnectDelay / 1000} с`, false);
+    setTimeout(openSocket, state.reconnectDelay);
+    state.reconnectDelay = Math.min(state.reconnectDelay * 2, 15000);
+  };
+}
+
+async function handleFrame(f) {
+  if (f.id) {
+    if (state.seenEvents.has(f.id)) return; // дубликат после догрузки
+    state.seenEvents.add(f.id);
+    state.lastEventId = f.id;
+    store.set('lastEventId', f.id);
+  }
+
+  switch (f.type) {
+    case 'connected': {
+      state.reconnectDelay = 1000;
+      setStatus('онлайн · ' + (f.payload.instance || ''), true);
+      if (f.payload.last_event_id) { state.lastEventId = f.payload.last_event_id; store.set('lastEventId', state.lastEventId); }
+      // Первое подключение или пропущено слишком много: перезагружаем состояние целиком
+      await loadChats();
+      if (f.payload.resync_required && state.active) openChat(state.active);
+      break;
+    }
+    case 'error':
+      toast(`${f.payload.code}: ${f.payload.message}`);
+      break;
+    case 'ack':
+      break;
+
+    case 'message.created': {
+      const m = f.payload;
+      const chat = state.chats.get(m.chat_id);
+      if (!chat) { loadChats(); break; }
+      chat.last_message = { id: m.id, sender_id: m.sender_id, type: m.type, content: m.content, is_deleted: false, created_at: m.created_at };
+      chat.updated_at = m.created_at;
+      if (m.chat_id === state.active) {
+        state.messages.set(m.id, m);
+        clearTyping(m.sender_id);
+        renderMessages(m.sender_id === state.me);
+        if (m.sender_id !== state.me && document.visibilityState === 'visible') markRead();
+      } else if (m.sender_id !== state.me) {
+        chat.unread_count = (chat.unread_count || 0) + 1;
+      }
+      renderChats();
+      break;
+    }
+    case 'message.updated':
+      if (f.chat_id === state.active) { state.messages.set(f.payload.id, f.payload); renderMessages(false); }
+      if (state.chats.get(f.chat_id)?.last_message?.id === f.payload.id) { state.chats.get(f.chat_id).last_message.content = f.payload.content; renderChats(); }
+      break;
+    case 'message.deleted':
+      for (const id of f.payload.message_ids) {
+        const m = state.messages.get(id);
+        if (m && f.chat_id === state.active) Object.assign(m, { deleted_at: new Date().toISOString(), content: '', reactions: [], attachments: [] });
+        const last = state.chats.get(f.chat_id)?.last_message;
+        if (last?.id === id) Object.assign(last, { is_deleted: true, content: '' });
+      }
+      renderMessages(false); renderChats();
+      break;
+    case 'message.reaction_added':
+    case 'message.reaction_removed': {
+      const m = state.messages.get(f.payload.message_id);
+      if (!m || f.chat_id !== state.active) break;
+      const r = { emoji: f.payload.emoji, user_id: f.payload.user_id };
+      m.reactions = (m.reactions || []).filter((x) => !(x.emoji === r.emoji && x.user_id === r.user_id));
+      if (f.type === 'message.reaction_added') m.reactions.push(r);
+      renderMessages(false);
+      break;
+    }
+    case 'chat.read': {
+      const chat = state.chats.get(f.chat_id);
+      const member = chat?.members.find((m) => m.user_id === f.payload.user_id);
+      if (member && (member.last_read_message_id || '') < f.payload.message_id) member.last_read_message_id = f.payload.message_id;
+      if (f.payload.user_id === state.me && chat) { chat.unread_count = 0; renderChats(); }
+      if (f.chat_id === state.active) renderMessages(false);
+      break;
+    }
+    case 'chat.member_removed':
+      if (f.payload.user_id === state.me) {
+        state.chats.delete(f.chat_id);
+        if (state.active === f.chat_id) closeChat();
+        renderChats();
+      } else {
+        refreshChat(f.chat_id);
+      }
+      break;
+    case 'chat.created':
+    case 'chat.member_added':
+    case 'chat.updated':
+    case 'chat.member_role_changed':
+      if (state.chats.has(f.chat_id)) refreshChat(f.chat_id); else loadChats();
+      break;
+    case 'message.pinned':
+    case 'message.unpinned':
+      break;
+
+    case 'typing':
+      if (f.chat_id === state.active) showTyping(f.payload.user_id);
+      break;
+    case 'presence':
+      state.online[f.payload.user_id] = f.payload.online;
+      renderHeader();
+      break;
+  }
+}
+
+function showTyping(userId) {
+  clearTimeout(state.typing.get(userId));
+  state.typing.set(userId, setTimeout(() => clearTyping(userId), 3500));
+  renderTyping();
+}
+function clearTyping(userId) {
+  clearTimeout(state.typing.get(userId));
+  state.typing.delete(userId);
+  renderTyping();
+}
+function renderTyping() {
+  const el = $('typing');
+  if (el) el.textContent = state.typing.size ? [...state.typing.keys()].map(name).join(', ') + ' печатает…' : '';
+}
+
+// ---------- Создание чатов ----------
+
+function memberIds() {
+  return $('new-members').value.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+$('create-group').onclick = async () => {
+  const chat = await api('POST', '/chats', { type: 'group', name: $('new-name').value, member_ids: memberIds() });
+  $('new-name').value = ''; $('new-members').value = '';
+  await loadChats(); openChat(chat.id);
+};
+$('create-direct').onclick = async () => {
+  const chat = await api('POST', '/chats', { type: 'direct', member_ids: memberIds().slice(0, 1) });
+  $('new-members').value = '';
+  await loadChats(); openChat(chat.id);
+};
+$('connect').onclick = connect;
+$('copy-me').onclick = () => navigator.clipboard?.writeText(state.me);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.active) markRead(); });
+
+const saved = store.get('token');
+if (saved) { $('token').value = saved; connect(); }
+</script>
+</body>
+</html>

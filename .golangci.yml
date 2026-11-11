@@ -1,0 +1,46 @@
+version: "2"
+
+run:
+  # Интеграционные тесты тоже проверяются линтером
+  build-tags:
+    - integration
+
+linters:
+  # standard: errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - bodyclose     # незакрытое тело HTTP-ответа
+    - errorlint     # сравнение ошибок без errors.Is/As
+    - misspell
+    - nilerr        # возврат nil вместо пойманной ошибки
+    - noctx         # HTTP-запросы без контекста
+    - unconvert
+    - usestdlibvars
+  settings:
+    errcheck:
+      exclude-functions:
+        # Ошибка закрытия соединения при выходе ничего не меняет
+        - (*github.com/coder/websocket.Conn).Close
+        - (*github.com/redis/go-redis/v9.Client).Close
+        - (*github.com/redis/go-redis/v9.PubSub).Close
+    misspell:
+      locale: US
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # В тестах допустимы упрощения: игнорирование ошибок вспомогательных вызовов и т.п.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - noctx
+          - bodyclose
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - main

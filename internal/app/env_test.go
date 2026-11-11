@@ -26,6 +26,7 @@ import (
 	domain "main/internal/domain/message_entity"
 	"main/internal/presence"
 	"main/internal/ratelimit"
+	"main/internal/testutil/fakes"
 	chatHandlers "main/internal/transport/http/chat_handlers"
 	msgHandlers "main/internal/transport/http/message_handlers"
 	wsHandler "main/internal/transport/http/ws_handler"
@@ -65,7 +66,7 @@ type env struct {
 	t       *testing.T
 	baseURL string
 	key     *rsa.PrivateKey // ключ "сервиса авторизации"
-	storage *fakeStorage
+	storage *fakes.Storage
 
 	alice, bob, carol, dave string
 }
@@ -84,7 +85,7 @@ func newEnv(t *testing.T, opts ...func(*options)) *env {
 	e := &env{
 		t:       t,
 		key:     newKey(t),
-		storage: newFakeStorage(),
+		storage: fakes.NewStorage(),
 		alice:   ulid.Make().String(),
 		bob:     ulid.Make().String(),
 		carol:   ulid.Make().String(),
@@ -92,8 +93,8 @@ func newEnv(t *testing.T, opts ...func(*options)) *env {
 	}
 
 	redisClient := redis.NewClient(&redis.Options{Addr: miniredis.RunT(t).Addr()})
-	chatRepo := newFakeChatRepo()
-	messageRepo := &fakeMessageRepo{}
+	chatRepo := fakes.NewChatRepo()
+	messageRepo := fakes.NewMessageRepo()
 
 	membersCache := cacheUC.NewInMemoryCache(
 		cache.NewCache[string, cacheUC.ChatMembers](
@@ -136,7 +137,7 @@ func newEnv(t *testing.T, opts ...func(*options)) *env {
 				configs.WebsocketConfig{
 					InsecureSkipVerify: true, ClientChanSize: 64,
 					MaxMessageSize: 16384, CompressionThreshold: 512,
-				}),
+				}, "test-instance"),
 		},
 		app.RouteDeps{
 			Verifier: jwt.NewVerifier(&e.key.PublicKey),

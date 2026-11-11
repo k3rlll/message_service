@@ -3,10 +3,13 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net"
 	"time"
 
 	domain "main/internal/domain/message_entity"
+	"main/internal/metrics"
 	"main/internal/transport/apierror"
 
 	"github.com/coder/websocket"
@@ -49,6 +52,8 @@ type Client struct {
 	send    chan []byte
 	backend Backend
 	logger  *slog.Logger
+	// Имя экземпляра сервиса, сообщается клиенту в кадре connected
+	instance string
 
 	// Отмена контекста - единственный способ закрыть клиента.
 	// Канал send никогда не закрывается, поэтому запись в него безопасна из любой горутины.
@@ -63,20 +68,22 @@ func NewClient(
 	userID string,
 	sendBufferSize int,
 	backend Backend,
+	instance string,
 	logger *slog.Logger,
 ) *Client {
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &Client{
-		hub:     hub,
-		conn:    conn,
-		userID:  userID,
-		connID:  ulid.Make().String(),
-		send:    make(chan []byte, sendBufferSize),
-		backend: backend,
-		logger:  logger,
-		ctx:     ctx,
-		cancel:  cancel,
+		hub:      hub,
+		conn:     conn,
+		userID:   userID,
+		connID:   ulid.Make().String(),
+		send:     make(chan []byte, sendBufferSize),
+		backend:  backend,
+		instance: instance,
+		logger:   logger,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 }
 
@@ -106,6 +113,7 @@ func (c *Client) Serve(lastEventID string) {
 		cursor, resync = c.replay(cursor)
 	}
 	if resync {
+		metrics.ReplayResyncs.Inc()
 		// Догрузить не удалось: клиент начнет с текущего конца потока
 		// и перезагрузит состояние через REST
 		cursor = c.lastEventID()
@@ -121,6 +129,7 @@ func (c *Client) Serve(lastEventID string) {
 
 	c.push(outFrame{Type: frameConnected, Payload: connectedPayload{
 		UserID:         c.userID,
+		Instance:       c.instance,
 		LastEventID:    cursor,
 		ResyncRequired: resync,
 	}}.encode())
@@ -159,6 +168,7 @@ func (c *Client) replay(cursor string) (newCursor string, resync bool) {
 		if !c.push(frame) {
 			break
 		}
+		metrics.EventsReplayed.Inc()
 	}
 	return lastID, false
 }
@@ -228,39 +238,57 @@ func (c *Client) readPump() {
 }
 
 func (c *Client) handle(frame inFrame) {
+	result := "ok"
+	defer func() {
+		frameType := frame.Type
+		switch frameType {
+		case frameMessageSend, frameTyping, frameChatRead:
+		default:
+			frameType = "unknown" // не даем клиенту плодить временные ряды произвольными типами
+		}
+		metrics.WSCommands.WithLabelValues(frameType, result).Inc()
+	}()
+
 	switch frame.Type {
 	case frameMessageSend:
 		var p SendMessagePayload
 		if !c.decode(frame, &p) {
+			result = "error"
 			return
 		}
 
 		// Отправителю сообщение придет еще и событием message.created,
 		// тем же путем, что и остальным участникам: через шину и Хаб
 		msg, err := c.backend.SendMessage(c.ctx, c.userID, p)
+		result = metrics.Result(err)
 		c.reply(frame, msg, err)
 
 	case frameTyping:
 		var p typingPayload
 		if !c.decode(frame, &p) {
+			result = "error"
 			return
 		}
 
 		// На успешный typing не отвечаем: это частый сигнал, подтверждение ему не нужно
 		if err := c.backend.Typing(c.ctx, c.userID, p.ChatID); err != nil {
+			result = "error"
 			c.reply(frame, nil, err)
 		}
 
 	case frameChatRead:
 		var p chatReadPayload
 		if !c.decode(frame, &p) {
+			result = "error"
 			return
 		}
 
 		err := c.backend.MarkRead(c.ctx, c.userID, p.ChatID, p.MessageID)
+		result = metrics.Result(err)
 		c.reply(frame, nil, err)
 
 	default:
+		result = "error"
 		c.replyError(frame.Ref, apierror.Info{
 			Code:    "INVALID_REQUEST",
 			Message: "unknown frame type: " + frame.Type,
@@ -321,7 +349,7 @@ func (c *Client) writePump() {
 			cancel()
 
 			if err != nil {
-				if c.ctx.Err() == nil {
+				if c.ctx.Err() == nil && !peerClosed(err) {
 					c.logger.WarnContext(c.ctx, "Error writing message to client",
 						"op", op, "userID", c.userID, "error", err)
 				}
@@ -334,7 +362,7 @@ func (c *Client) writePump() {
 			cancel()
 
 			if err != nil {
-				if c.ctx.Err() == nil {
+				if c.ctx.Err() == nil && !peerClosed(err) {
 					c.logger.WarnContext(c.ctx, "Client did not respond to PING",
 						"op", op, "userID", c.userID, "error", err)
 				}
@@ -344,4 +372,10 @@ func (c *Client) writePump() {
 			c.backend.Heartbeat(c.ctx, c.userID, c.connID)
 		}
 	}
+}
+
+// peerClosed сообщает, что запись не удалась потому, что клиент уже закрыл соединение.
+// Это штатная ситуация: readPump заметит закрытие чуть позже writePump.
+func peerClosed(err error) bool {
+	return errors.Is(err, net.ErrClosed) || websocket.CloseStatus(err) != -1
 }

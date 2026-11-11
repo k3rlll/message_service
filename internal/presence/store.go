@@ -3,6 +3,7 @@ package presence
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -119,9 +120,13 @@ func (s *Store) Online(ctx context.Context, userIDs []string) (map[string]bool, 
 func (s *Store) TryTyping(ctx context.Context, chatID, userID string) (bool, error) {
 	key := "typing:" + chatID + ":" + userID
 
-	set, err := s.client.SetNX(ctx, key, 1, s.typingTTL).Result()
+	// SET NX: ключ ставится, только если его еще нет. redis.Nil - ключ уже был
+	err := s.client.SetArgs(ctx, key, 1, redis.SetArgs{Mode: "NX", TTL: s.typingTTL}).Err()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("presence.TryTyping: %w", err)
 	}
-	return set, nil
+	return true, nil
 }

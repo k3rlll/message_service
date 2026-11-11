@@ -1,0 +1,813 @@
+openapi: 3.1.0
+info:
+  title: Message Service API
+  version: 1.0.0
+  description: |
+    Сервис сообщений: чаты, история, доставка в реальном времени по WebSocket.
+
+    **Аутентификация.** Токены выпускает отдельный сервис авторизации: JWT, подпись RS256,
+    `sub` - ID пользователя (ULID), `exp` обязателен. Для REST токен передается в заголовке
+    `Authorization: Bearer <token>`. Для локальной разработки токен выдает `go run ./cmd/devtoken`.
+
+    **Идентификаторы** - ULID. Они сортируются по времени создания, поэтому ID сообщения
+    служит и курсором пагинации.
+
+    **Ошибки** всегда приходят в одном формате (`Error`). Код ошибки (`error.code`) совпадает
+    с кодами ошибок в WebSocket-протоколе.
+
+    **Лимиты.** На пользователя: REST-запросы и отправка сообщений (REST и WebSocket суммарно).
+    При превышении - `429` с заголовком `Retry-After`. В ответах есть `X-RateLimit-Limit`
+    и `X-RateLimit-Remaining`.
+
+    ## WebSocket
+
+    `GET /api/v1/ws?token=<jwt>&last_event_id=<id>` - браузер не умеет ставить заголовки на
+    WebSocket, поэтому токен передается в query. Все кадры - JSON в общем конверте:
+
+    ```json
+    {"type": "...", "ref": "...", "payload": {...}}
+    ```
+
+    Команды клиента (`ref` - произвольная строка, вернется в ответе):
+
+    | type | payload | ответ |
+    |------|---------|-------|
+    | `message.send` | `{chat_id, text, client_msg_id?, reply_to_id?, attachments?}` | `ack` с сообщением |
+    | `typing` | `{chat_id}` | только `error` при ошибке |
+    | `chat.read` | `{chat_id, message_id}` | `ack` |
+
+    Кадры сервера: `connected` (`{user_id, instance, last_event_id, resync_required}`),
+    `ack`, `error` (`{code, message}`) и события чатов:
+
+    ```json
+    {"id": "1731340000000-0", "type": "message.created", "chat_id": "...", "payload": {...}}
+    ```
+
+    События: `message.created`, `message.updated`, `message.deleted`, `message.reaction_added`,
+    `message.reaction_removed`, `message.pinned`, `message.unpinned`, `chat.created`, `chat.updated`,
+    `chat.member_added`, `chat.member_removed`, `chat.member_role_changed`, `chat.read`.
+    Эфемерные (без `id`, не догружаются): `typing`, `presence`.
+
+    **Догрузка после обрыва.** Клиент хранит `id` последнего события и передает его в
+    `last_event_id` при переподключении: пропущенные события придут до кадра `connected`.
+    Если `resync_required: true`, догрузить не удалось - нужно перезагрузить данные через REST.
+    Событие может прийти дважды, дубликаты отбрасываются по `id`.
+
+servers:
+  - url: /
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: messages
+  - name: chats
+  - name: members
+  - name: pins
+  - name: attachments
+
+paths:
+  /api/v1/messages:
+    post:
+      tags: [messages]
+      summary: Отправить сообщение
+      description: |
+        Отправитель берется из токена. Повтор запроса с тем же `client_msg_id` не создает
+        дубликат: вернется уже сохраненное сообщение с кодом `200`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendMessageRequest' }
+      responses:
+        '201':
+          description: Сообщение создано
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '200':
+          description: Сообщение с таким client_msg_id уже было отправлено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [messages]
+      summary: История сообщений чата
+      description: От новых к старым. Удаленные сообщения остаются в выдаче с `deleted_at`.
+      parameters:
+        - $ref: '#/components/parameters/ChatIDQuery'
+        - name: anchor
+          in: query
+          description: Курсор - ID самого старого из уже загруженных сообщений
+          schema: { $ref: '#/components/schemas/ULID' }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Страница сообщений
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessagesPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [messages]
+      summary: Удалить сообщения
+      description: |
+        Мягкое удаление: содержимое, вложения и реакции стираются, сообщение остается в истории.
+        Участник удаляет только свои сообщения, владелец и админы - любые.
+        Если ни одно сообщение удалить нельзя - `404`.
+      parameters:
+        - $ref: '#/components/parameters/ChatIDQuery'
+        - name: message_ids
+          in: query
+          required: true
+          style: form
+          explode: true
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 100
+            items: { $ref: '#/components/schemas/ULID' }
+      responses:
+        '200':
+          description: Удаленные сообщения
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted_ids]
+                properties:
+                  deleted_ids:
+                    type: array
+                    items: { $ref: '#/components/schemas/ULID' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/messages/search:
+    get:
+      tags: [messages]
+      summary: Полнотекстовый поиск в чате
+      description: Ищет среди текстовых неудаленных сообщений за последние 60 дней.
+      parameters:
+        - $ref: '#/components/parameters/ChatIDQuery'
+        - name: text
+          in: query
+          required: true
+          schema: { type: string, maxLength: 200 }
+        - name: anchor
+          in: query
+          schema: { $ref: '#/components/schemas/ULID' }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200':
+          description: Найденные сообщения
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessagesPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/messages/{message_id}:
+    put:
+      tags: [messages]
+      summary: Изменить текст сообщения
+      description: Только автор и только неудаленное сообщение.
+      parameters:
+        - $ref: '#/components/parameters/MessageIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chat_id, content]
+              properties:
+                chat_id: { $ref: '#/components/schemas/ULID' }
+                content: { type: string, minLength: 1, maxLength: 4000 }
+      responses:
+        '200':
+          description: Измененное сообщение
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/messages/{message_id}/reactions:
+    put:
+      tags: [messages]
+      summary: Поставить реакцию
+      description: Повторная установка той же реакции ничего не меняет.
+      parameters:
+        - $ref: '#/components/parameters/MessageIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chat_id, emoji]
+              properties:
+                chat_id: { $ref: '#/components/schemas/ULID' }
+                emoji: { type: string, maxLength: 32, examples: ['👍'] }
+      responses:
+        '200':
+          description: Сообщение с реакциями
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [messages]
+      summary: Убрать свою реакцию
+      parameters:
+        - $ref: '#/components/parameters/MessageIDPath'
+        - $ref: '#/components/parameters/ChatIDQuery'
+        - name: emoji
+          in: query
+          required: true
+          schema: { type: string, maxLength: 32 }
+      responses:
+        '200':
+          description: Сообщение с реакциями
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/chats:
+    post:
+      tags: [chats]
+      summary: Создать чат
+      description: |
+        Личный чат (`direct`) - ровно один другой участник, владельца нет. Между двумя
+        пользователями существует только один личный чат: повторное создание вернет его с кодом `200`.
+
+        Групповой чат (`group`) - создатель становится владельцем. Существование пользователей
+        не проверяется: ими владеет сервис авторизации.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, enum: [direct, group] }
+                name: { type: string, maxLength: 100, description: Обязательно для группового чата }
+                member_ids:
+                  type: array
+                  maxItems: 199
+                  items: { $ref: '#/components/schemas/ULID' }
+      responses:
+        '201':
+          description: Чат создан
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chat' }
+        '200':
+          description: Личный чат с этим пользователем уже существует
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chat' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    get:
+      tags: [chats]
+      summary: Чаты пользователя
+      description: Сначала чаты с самой свежей активностью.
+      parameters:
+        - name: before
+          in: query
+          description: Курсор - значение `next_before` из предыдущей страницы
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Страница чатов
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [chats, has_more]
+                properties:
+                  chats:
+                    type: array
+                    items: { $ref: '#/components/schemas/ChatSummary' }
+                  has_more: { type: boolean }
+                  next_before: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/chats/{chat_id}:
+    parameters:
+      - $ref: '#/components/parameters/ChatIDPath'
+    get:
+      tags: [chats]
+      summary: Чат с участниками и счетчиком непрочитанных
+      responses:
+        '200':
+          description: Чат
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [chats]
+      summary: Переименовать групповой чат
+      description: Владелец и админы.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 100 }
+      responses:
+        '200':
+          description: Чат
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chat' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/chats/{chat_id}/members:
+    post:
+      tags: [members]
+      summary: Добавить участника
+      description: Владелец и админы, только в групповом чате.
+      parameters:
+        - $ref: '#/components/parameters/ChatIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { $ref: '#/components/schemas/ULID' }
+      responses:
+        '200':
+          description: Чат с новым участником
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chat' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/chats/{chat_id}/members/{user_id}:
+    delete:
+      tags: [members]
+      summary: Удалить участника или выйти из чата
+      description: |
+        Себя может удалить любой участник, кроме владельца - он сначала передает владение (`409`).
+        Других удаляют владелец (кого угодно) и админы (только обычных участников).
+      parameters:
+        - $ref: '#/components/parameters/ChatIDPath'
+        - $ref: '#/components/parameters/UserIDPath'
+      responses:
+        '204': { description: Участник удален }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/chats/{chat_id}/members/{user_id}/role:
+    put:
+      tags: [members]
+      summary: Изменить роль участника
+      description: Только владелец. Роль `owner` передает владение, прежний владелец становится админом.
+      parameters:
+        - $ref: '#/components/parameters/ChatIDPath'
+        - $ref: '#/components/parameters/UserIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: '#/components/schemas/Role' }
+      responses:
+        '204': { description: Роль изменена }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/chats/{chat_id}/read:
+    post:
+      tags: [chats]
+      summary: Отметить чат прочитанным
+      description: До сообщения `message_id` включительно. Отметка не сдвигается назад.
+      parameters:
+        - $ref: '#/components/parameters/ChatIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message_id]
+              properties:
+                message_id: { $ref: '#/components/schemas/ULID' }
+      responses:
+        '204': { description: Отметка сохранена }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/chats/{chat_id}/presence:
+    get:
+      tags: [chats]
+      summary: Онлайн-статус участников чата
+      parameters:
+        - $ref: '#/components/parameters/ChatIDPath'
+      responses:
+        '200':
+          description: userID - онлайн ли пользователь
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  online:
+                    type: object
+                    additionalProperties: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/chats/{chat_id}/pins:
+    get:
+      tags: [pins]
+      summary: Закрепленные сообщения
+      parameters:
+        - $ref: '#/components/parameters/ChatIDPath'
+      responses:
+        '200':
+          description: Закрепленные неудаленные сообщения
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: '#/components/schemas/Message' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/chats/{chat_id}/pins/{message_id}:
+    parameters:
+      - $ref: '#/components/parameters/ChatIDPath'
+      - $ref: '#/components/parameters/MessageIDPath'
+    put:
+      tags: [pins]
+      summary: Закрепить сообщение
+      description: В групповом чате - владелец и админы, в личном - оба участника. Не больше 50 закрепов.
+      responses:
+        '204': { description: Сообщение закреплено }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [pins]
+      summary: Открепить сообщение
+      responses:
+        '204': { description: Сообщение откреплено }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/chats/{chat_id}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/ChatIDPath'
+    post:
+      tags: [attachments]
+      summary: Получить ссылку для загрузки файла
+      description: |
+        Файл загружается напрямую в S3 по выданной ссылке методом `PUT`, минуя сервис.
+        Затем `key` указывается во вложениях сообщения. При отправке сервис проверяет,
+        что файл загружен и укладывается в лимит размера.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_name, size]
+              properties:
+                file_name: { type: string, maxLength: 255 }
+                size: { type: integer, minimum: 1, description: Размер в байтах }
+      responses:
+        '201':
+          description: Ссылка для загрузки
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SignedURL' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    get:
+      tags: [attachments]
+      summary: Получить ссылку для скачивания файла
+      parameters:
+        - name: key
+          in: query
+          required: true
+          schema: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: Ссылка для скачивания
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SignedURL' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    ChatIDPath:
+      name: chat_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/ULID' }
+    ChatIDQuery:
+      name: chat_id
+      in: query
+      required: true
+      schema: { $ref: '#/components/schemas/ULID' }
+    MessageIDPath:
+      name: message_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/ULID' }
+    UserIDPath:
+      name: user_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/ULID' }
+
+  responses:
+    BadRequest:
+      description: Запрос не прошел проверку бизнес-правил (`INVALID_REQUEST`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Нет токена, он просрочен или недействителен (`UNAUTHORIZED`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Пользователь не участник чата или роль не позволяет действие (`FORBIDDEN`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Чат или сообщение не найдены (`NOT_FOUND`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Действие противоречит текущему состоянию (`CONFLICT`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationError:
+      description: Ошибки валидации по полям (`VALIDATION_ERROR`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: Превышен лимит (`RATE_LIMITED`)
+      headers:
+        Retry-After:
+          description: Через сколько секунд можно повторить
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: Функция не настроена на сервере или БД недоступна (`SERVICE_UNAVAILABLE`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    ULID:
+      type: string
+      pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: ['01JD8X3Q5N7ZK2W4M6R8T0V9YA']
+
+    Role:
+      type: string
+      enum: [owner, admin, member]
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [INVALID_REQUEST, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT,
+                     VALIDATION_ERROR, RATE_LIMITED, SERVICE_UNAVAILABLE, INTERNAL_ERROR, METHOD_NOT_ALLOWED]
+            message: { type: string }
+            details:
+              type: object
+              description: Только для VALIDATION_ERROR - поле и нарушенное правило
+              additionalProperties: { type: string }
+
+    Attachment:
+      type: object
+      required: [key]
+      properties:
+        key: { type: string, description: Ключ объекта, выданный при загрузке }
+        name: { type: string }
+        content_type: { type: string }
+        size: { type: integer, readOnly: true, description: Берется из хранилища }
+
+    Reaction:
+      type: object
+      properties:
+        emoji: { type: string }
+        user_id: { $ref: '#/components/schemas/ULID' }
+
+    SendMessageRequest:
+      type: object
+      required: [chat_id]
+      properties:
+        chat_id: { $ref: '#/components/schemas/ULID' }
+        type:
+          type: string
+          enum: [text, image, video, audio, file]
+          default: text
+        content:
+          type: string
+          maxLength: 4000
+          description: Может быть пустым, если есть вложения
+        client_msg_id:
+          type: string
+          maxLength: 64
+          description: Ключ идемпотентности, генерирует клиент
+        reply_to_id: { $ref: '#/components/schemas/ULID' }
+        attachments:
+          type: array
+          maxItems: 10
+          items: { $ref: '#/components/schemas/Attachment' }
+        metadata:
+          type: object
+          additionalProperties: true
+
+    Message:
+      type: object
+      required: [id, chat_id, sender_id, type, content, is_edited, created_at, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/ULID' }
+        chat_id: { $ref: '#/components/schemas/ULID' }
+        sender_id: { $ref: '#/components/schemas/ULID' }
+        type:
+          type: string
+          enum: [text, image, video, audio, file, system]
+        content: { type: string }
+        client_msg_id: { type: string }
+        reply_to_id: { $ref: '#/components/schemas/ULID' }
+        attachments:
+          type: array
+          items: { $ref: '#/components/schemas/Attachment' }
+        reactions:
+          type: array
+          items: { $ref: '#/components/schemas/Reaction' }
+        metadata:
+          type: object
+          additionalProperties: true
+        is_edited: { type: boolean }
+        deleted_at:
+          type: string
+          format: date-time
+          description: Задан у удаленных сообщений; содержимое у них пустое
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    MessagesPage:
+      type: object
+      required: [messages, has_more]
+      properties:
+        messages:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        has_more: { type: boolean }
+
+    Member:
+      type: object
+      required: [user_id, role, joined_at]
+      properties:
+        user_id: { $ref: '#/components/schemas/ULID' }
+        role: { $ref: '#/components/schemas/Role' }
+        joined_at: { type: string, format: date-time }
+        last_read_message_id: { $ref: '#/components/schemas/ULID' }
+
+    LastMessage:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/ULID' }
+        sender_id: { $ref: '#/components/schemas/ULID' }
+        type: { type: string }
+        content: { type: string, description: Первые 200 символов }
+        is_deleted: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    Chat:
+      type: object
+      required: [id, type, name, members, created_at, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/ULID' }
+        type: { type: string, enum: [direct, group] }
+        name: { type: string }
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/Member' }
+        last_message: { $ref: '#/components/schemas/LastMessage' }
+        pinned_message_ids:
+          type: array
+          items: { $ref: '#/components/schemas/ULID' }
+        created_at: { type: string, format: date-time }
+        updated_at:
+          type: string
+          format: date-time
+          description: Время последней активности
+
+    ChatSummary:
+      allOf:
+        - $ref: '#/components/schemas/Chat'
+        - type: object
+          required: [unread_count]
+          properties:
+            unread_count:
+              type: integer
+              maximum: 100
+              description: Непрочитанные чужие сообщения; считается не дальше 100
+
+    SignedURL:
+      type: object
+      required: [key, url, expires_at]
+      properties:
+        key: { type: string }
+        url: { type: string, format: uri }
+        expires_at: { type: string, format: date-time }

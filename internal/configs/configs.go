@@ -30,8 +30,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host            string        `env:"SERVER_HOST" env-default:"0.0.0.0"`
-	Port            string        `env:"SERVER_PORT" env-default:"8080"`
+	Host string `env:"SERVER_HOST" env-default:"0.0.0.0"`
+	Port string `env:"SERVER_PORT" env-default:"8080"`
+	// Служебный порт: /metrics, /healthz, /readyz. Наружу через балансировщик не публикуется.
+	AdminPort       string        `env:"ADMIN_PORT" env-default:"8081"`
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout" env-default:"10s"`
 }
 

@@ -6,6 +6,7 @@ import (
 	"main/internal/ratelimit"
 	chatHandlers "main/internal/transport/http/chat_handlers"
 	msgHandlers "main/internal/transport/http/message_handlers"
+	"main/internal/transport/http/static"
 	wsHandler "main/internal/transport/http/ws_handler"
 	mddlwr "main/internal/transport/middleware"
 
@@ -23,6 +24,8 @@ type RouteDeps struct {
 	Limiter  mddlwr.RateLimiter
 	HTTPRule ratelimit.Rule
 	Logger   *slog.Logger
+	// Имя экземпляра сервиса, отдается в заголовке X-Instance. Пустое - заголовка нет.
+	Instance string
 }
 
 // MapRoutes maps the API routes to their corresponding handler functions.
@@ -71,4 +74,9 @@ func MapRoutes(e *echo.Echo, h Handlers, deps RouteDeps) {
 
 	// WebSocket: токен можно передать в query, отправка сообщений лимитируется в usecase
 	v1.GET("/ws", h.WS.WS, mddlwr.WSAuthMiddleware(deps.Verifier))
+
+	// Без аутентификации: демо-клиент и документация
+	e.GET("/", static.Client)
+	e.GET("/docs", static.Docs)
+	e.GET("/openapi.yaml", static.OpenAPI)
 }

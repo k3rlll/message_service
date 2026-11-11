@@ -1,8 +1,12 @@
-package app_test
+// Package fakes - in-memory реализации репозиториев MongoDB и S3 для тестов.
+// Повторяют семантику настоящих реализаций, включая уникальные индексы
+// и защиту от гонок, которую дают фильтры запросов.
+package fakes
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -12,9 +16,6 @@ import (
 	domainChat "main/internal/domain/chat_entity"
 	domain "main/internal/domain/message_entity"
 )
-
-// Фейки MongoDB-репозиториев и S3. Повторяют семантику настоящих реализаций,
-// включая уникальные индексы и защиту от гонок, которую дают фильтры запросов.
 
 // clone - глубокая копия через JSON, чтобы тест не видел общих срезов и мап
 func clone[T any](v T) T {
@@ -26,12 +27,12 @@ func clone[T any](v T) T {
 
 // --- Сообщения ---
 
-type fakeMessageRepo struct {
+type MessageRepo struct {
 	mu   sync.Mutex
 	msgs []domain.Message
 }
 
-func (r *fakeMessageRepo) SaveMessage(_ context.Context, msg *domain.Message) error {
+func (r *MessageRepo) SaveMessage(_ context.Context, msg *domain.Message) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -46,7 +47,7 @@ func (r *fakeMessageRepo) SaveMessage(_ context.Context, msg *domain.Message) er
 	return nil
 }
 
-func (r *fakeMessageRepo) findOne(match func(domain.Message) bool) (*domain.Message, error) {
+func (r *MessageRepo) findOne(match func(domain.Message) bool) (*domain.Message, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -59,17 +60,17 @@ func (r *fakeMessageRepo) findOne(match func(domain.Message) bool) (*domain.Mess
 	return nil, domainComm.ErrNotFound
 }
 
-func (r *fakeMessageRepo) GetMessage(_ context.Context, chatID, messageID string) (*domain.Message, error) {
+func (r *MessageRepo) GetMessage(_ context.Context, chatID, messageID string) (*domain.Message, error) {
 	return r.findOne(func(m domain.Message) bool { return m.ID == messageID && m.ChatID == chatID })
 }
 
-func (r *fakeMessageRepo) GetMessageByClientID(_ context.Context, chatID, senderID, clientID string) (*domain.Message, error) {
+func (r *MessageRepo) GetMessageByClientID(_ context.Context, chatID, senderID, clientID string) (*domain.Message, error) {
 	return r.findOne(func(m domain.Message) bool {
 		return m.ChatID == chatID && m.SenderID == senderID && m.ClientMessageID == clientID
 	})
 }
 
-func (r *fakeMessageRepo) query(chatID, anchorID string, limit int64, match func(domain.Message) bool) []domain.Message {
+func (r *MessageRepo) query(chatID, anchorID string, limit int64, match func(domain.Message) bool) []domain.Message {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -87,24 +88,24 @@ func (r *fakeMessageRepo) query(chatID, anchorID string, limit int64, match func
 	return out
 }
 
-func (r *fakeMessageRepo) GetMessages(_ context.Context, chatID string, ids []string) ([]domain.Message, error) {
+func (r *MessageRepo) GetMessages(_ context.Context, chatID string, ids []string) ([]domain.Message, error) {
 	set := toSet(ids)
 	return r.query(chatID, "", int64(len(ids)), func(m domain.Message) bool {
 		return set[m.ID] && !m.IsDeleted()
 	}), nil
 }
 
-func (r *fakeMessageRepo) ListMessages(_ context.Context, chatID, anchorID string, limit int64) ([]domain.Message, error) {
+func (r *MessageRepo) ListMessages(_ context.Context, chatID, anchorID string, limit int64) ([]domain.Message, error) {
 	return r.query(chatID, anchorID, limit, func(domain.Message) bool { return true }), nil
 }
 
-func (r *fakeMessageRepo) SearchMessages(_ context.Context, chatID, text, anchorID string, limit int64) ([]domain.Message, error) {
+func (r *MessageRepo) SearchMessages(_ context.Context, chatID, text, anchorID string, limit int64) ([]domain.Message, error) {
 	return r.query(chatID, anchorID, limit, func(m domain.Message) bool {
 		return m.Type == domain.TypeText && !m.IsDeleted() && strings.Contains(m.Content, text)
 	}), nil
 }
 
-func (r *fakeMessageRepo) CountUnread(_ context.Context, chatID, userID, afterID string, limit int64) (int64, error) {
+func (r *MessageRepo) CountUnread(_ context.Context, chatID, userID, afterID string, limit int64) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -118,7 +119,7 @@ func (r *fakeMessageRepo) CountUnread(_ context.Context, chatID, userID, afterID
 }
 
 // update применяет изменение к первому подходящему сообщению и возвращает его копию
-func (r *fakeMessageRepo) update(match func(domain.Message) bool, change func(*domain.Message)) (*domain.Message, error) {
+func (r *MessageRepo) update(match func(domain.Message) bool, change func(*domain.Message)) (*domain.Message, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -132,7 +133,7 @@ func (r *fakeMessageRepo) update(match func(domain.Message) bool, change func(*d
 	return nil, domainComm.ErrNotFound
 }
 
-func (r *fakeMessageRepo) UpdateMessage(_ context.Context, userID, chatID, messageID, content string) (*domain.Message, error) {
+func (r *MessageRepo) UpdateMessage(_ context.Context, userID, chatID, messageID, content string) (*domain.Message, error) {
 	return r.update(
 		func(m domain.Message) bool {
 			return m.ID == messageID && m.ChatID == chatID && m.SenderID == userID && !m.IsDeleted()
@@ -144,7 +145,7 @@ func (r *fakeMessageRepo) UpdateMessage(_ context.Context, userID, chatID, messa
 		})
 }
 
-func (r *fakeMessageRepo) SoftDeleteMessages(_ context.Context, chatID string, ids []string, senderID string) ([]string, error) {
+func (r *MessageRepo) SoftDeleteMessages(_ context.Context, chatID string, ids []string, senderID string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -167,7 +168,7 @@ func (r *fakeMessageRepo) SoftDeleteMessages(_ context.Context, chatID string, i
 	return deleted, nil
 }
 
-func (r *fakeMessageRepo) AddReaction(_ context.Context, chatID, messageID string, reaction domain.Reaction) (*domain.Message, error) {
+func (r *MessageRepo) AddReaction(_ context.Context, chatID, messageID string, reaction domain.Reaction) (*domain.Message, error) {
 	return r.update(
 		func(m domain.Message) bool { return m.ID == messageID && m.ChatID == chatID && !m.IsDeleted() },
 		func(m *domain.Message) {
@@ -180,7 +181,7 @@ func (r *fakeMessageRepo) AddReaction(_ context.Context, chatID, messageID strin
 		})
 }
 
-func (r *fakeMessageRepo) RemoveReaction(_ context.Context, chatID, messageID string, reaction domain.Reaction) (*domain.Message, error) {
+func (r *MessageRepo) RemoveReaction(_ context.Context, chatID, messageID string, reaction domain.Reaction) (*domain.Message, error) {
 	return r.update(
 		func(m domain.Message) bool { return m.ID == messageID && m.ChatID == chatID && !m.IsDeleted() },
 		func(m *domain.Message) {
@@ -196,16 +197,21 @@ func (r *fakeMessageRepo) RemoveReaction(_ context.Context, chatID, messageID st
 
 // --- Чаты ---
 
-type fakeChatRepo struct {
+type ChatRepo struct {
 	mu    sync.Mutex
 	chats map[string]*domainChat.Chat
 }
 
-func newFakeChatRepo() *fakeChatRepo {
-	return &fakeChatRepo{chats: map[string]*domainChat.Chat{}}
+// NewMessageRepo возвращает пустой репозиторий сообщений
+func NewMessageRepo() *MessageRepo {
+	return &MessageRepo{}
 }
 
-func (r *fakeChatRepo) CreateChat(_ context.Context, chat *domainChat.Chat) error {
+func NewChatRepo() *ChatRepo {
+	return &ChatRepo{chats: map[string]*domainChat.Chat{}}
+}
+
+func (r *ChatRepo) CreateChat(_ context.Context, chat *domainChat.Chat) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -222,7 +228,7 @@ func (r *fakeChatRepo) CreateChat(_ context.Context, chat *domainChat.Chat) erro
 	return nil
 }
 
-func (r *fakeChatRepo) GetChat(_ context.Context, chatID string) (*domainChat.Chat, error) {
+func (r *ChatRepo) GetChat(_ context.Context, chatID string) (*domainChat.Chat, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -234,7 +240,7 @@ func (r *fakeChatRepo) GetChat(_ context.Context, chatID string) (*domainChat.Ch
 	return &c, nil
 }
 
-func (r *fakeChatRepo) GetDirectChat(_ context.Context, directKey string) (*domainChat.Chat, error) {
+func (r *ChatRepo) GetDirectChat(_ context.Context, directKey string) (*domainChat.Chat, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -247,7 +253,7 @@ func (r *fakeChatRepo) GetDirectChat(_ context.Context, directKey string) (*doma
 	return nil, domainChat.ErrChatNotFound
 }
 
-func (r *fakeChatRepo) ListChats(_ context.Context, userID string, before time.Time, limit int64) ([]domainChat.Chat, error) {
+func (r *ChatRepo) ListChats(_ context.Context, userID string, before time.Time, limit int64) ([]domainChat.Chat, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -273,7 +279,7 @@ func (r *fakeChatRepo) ListChats(_ context.Context, userID string, before time.T
 	return out, nil
 }
 
-func (r *fakeChatRepo) ChatMembers(_ context.Context, chatID string) ([]domainChat.Member, error) {
+func (r *ChatRepo) ChatMembers(_ context.Context, chatID string) ([]domainChat.Member, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -284,7 +290,7 @@ func (r *fakeChatRepo) ChatMembers(_ context.Context, chatID string) ([]domainCh
 	return clone(chat.Members), nil
 }
 
-func (r *fakeChatRepo) ContactIDs(_ context.Context, userID string) ([]string, error) {
+func (r *ChatRepo) ContactIDs(_ context.Context, userID string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -309,7 +315,7 @@ func (r *fakeChatRepo) ContactIDs(_ context.Context, userID string) ([]string, e
 
 // modify меняет чат под мьютексом. Если чата нет, возвращает ErrNotFound,
 // как UpdateOne с MatchedCount == 0.
-func (r *fakeChatRepo) modify(chatID string, change func(*domainChat.Chat) error) error {
+func (r *ChatRepo) modify(chatID string, change func(*domainChat.Chat) error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -320,7 +326,7 @@ func (r *fakeChatRepo) modify(chatID string, change func(*domainChat.Chat) error
 	return change(chat)
 }
 
-func (r *fakeChatRepo) RenameChat(_ context.Context, chatID, name string) error {
+func (r *ChatRepo) RenameChat(_ context.Context, chatID, name string) error {
 	return r.modify(chatID, func(c *domainChat.Chat) error {
 		c.Name = name
 		c.UpdatedAt = time.Now().UTC()
@@ -328,7 +334,7 @@ func (r *fakeChatRepo) RenameChat(_ context.Context, chatID, name string) error 
 	})
 }
 
-func (r *fakeChatRepo) AddMember(_ context.Context, chatID string, member domainChat.Member) error {
+func (r *ChatRepo) AddMember(_ context.Context, chatID string, member domainChat.Member) error {
 	return r.modify(chatID, func(c *domainChat.Chat) error {
 		if _, exists := c.Member(member.UserID); exists {
 			return domainComm.ErrConflict
@@ -339,7 +345,7 @@ func (r *fakeChatRepo) AddMember(_ context.Context, chatID string, member domain
 	})
 }
 
-func (r *fakeChatRepo) RemoveMember(_ context.Context, chatID, userID string) error {
+func (r *ChatRepo) RemoveMember(_ context.Context, chatID, userID string) error {
 	return r.modify(chatID, func(c *domainChat.Chat) error {
 		kept := c.Members[:0]
 		for _, m := range c.Members {
@@ -355,7 +361,7 @@ func (r *fakeChatRepo) RemoveMember(_ context.Context, chatID, userID string) er
 	})
 }
 
-func (r *fakeChatRepo) SetRoles(_ context.Context, chatID string, roles map[string]string) error {
+func (r *ChatRepo) SetRoles(_ context.Context, chatID string, roles map[string]string) error {
 	err := r.modify(chatID, func(c *domainChat.Chat) error {
 		for i := range c.Members {
 			if role, ok := roles[c.Members[i].UserID]; ok {
@@ -370,7 +376,7 @@ func (r *fakeChatRepo) SetRoles(_ context.Context, chatID string, roles map[stri
 	return nil
 }
 
-func (r *fakeChatRepo) SetLastMessage(_ context.Context, chatID string, last domainChat.LastMessage) error {
+func (r *ChatRepo) SetLastMessage(_ context.Context, chatID string, last domainChat.LastMessage) error {
 	err := r.modify(chatID, func(c *domainChat.Chat) error {
 		if c.LastMessage == nil || c.LastMessage.ID < last.ID {
 			c.LastMessage = &last
@@ -378,13 +384,13 @@ func (r *fakeChatRepo) SetLastMessage(_ context.Context, chatID string, last dom
 		}
 		return nil
 	})
-	if err == domainComm.ErrNotFound {
+	if errors.Is(err, domainComm.ErrNotFound) {
 		return nil
 	}
 	return err
 }
 
-func (r *fakeChatRepo) PatchLastMessage(_ context.Context, chatID string, ids []string, content string, deleted bool) error {
+func (r *ChatRepo) PatchLastMessage(_ context.Context, chatID string, ids []string, content string, deleted bool) error {
 	set := toSet(ids)
 	err := r.modify(chatID, func(c *domainChat.Chat) error {
 		if c.LastMessage != nil && set[c.LastMessage.ID] {
@@ -393,13 +399,13 @@ func (r *fakeChatRepo) PatchLastMessage(_ context.Context, chatID string, ids []
 		}
 		return nil
 	})
-	if err == domainComm.ErrNotFound {
+	if errors.Is(err, domainComm.ErrNotFound) {
 		return nil
 	}
 	return err
 }
 
-func (r *fakeChatRepo) MarkRead(_ context.Context, chatID, userID, messageID string) (bool, error) {
+func (r *ChatRepo) MarkRead(_ context.Context, chatID, userID, messageID string) (bool, error) {
 	changed := false
 	err := r.modify(chatID, func(c *domainChat.Chat) error {
 		for i := range c.Members {
@@ -410,13 +416,13 @@ func (r *fakeChatRepo) MarkRead(_ context.Context, chatID, userID, messageID str
 		}
 		return nil
 	})
-	if err == domainComm.ErrNotFound {
+	if errors.Is(err, domainComm.ErrNotFound) {
 		return false, nil
 	}
 	return changed, err
 }
 
-func (r *fakeChatRepo) AddPin(_ context.Context, chatID, messageID string) (bool, error) {
+func (r *ChatRepo) AddPin(_ context.Context, chatID, messageID string) (bool, error) {
 	changed := false
 	err := r.modify(chatID, func(c *domainChat.Chat) error {
 		for _, id := range c.PinnedMessageIDs {
@@ -428,13 +434,13 @@ func (r *fakeChatRepo) AddPin(_ context.Context, chatID, messageID string) (bool
 		changed = true
 		return nil
 	})
-	if err == domainComm.ErrNotFound {
+	if errors.Is(err, domainComm.ErrNotFound) {
 		return false, nil
 	}
 	return changed, err
 }
 
-func (r *fakeChatRepo) RemovePin(_ context.Context, chatID, messageID string) (bool, error) {
+func (r *ChatRepo) RemovePin(_ context.Context, chatID, messageID string) (bool, error) {
 	changed := false
 	err := r.modify(chatID, func(c *domainChat.Chat) error {
 		kept := c.PinnedMessageIDs[:0]
@@ -448,7 +454,7 @@ func (r *fakeChatRepo) RemovePin(_ context.Context, chatID, messageID string) (b
 		c.PinnedMessageIDs = kept
 		return nil
 	})
-	if err == domainComm.ErrNotFound {
+	if errors.Is(err, domainComm.ErrNotFound) {
 		return false, nil
 	}
 	return changed, err
@@ -456,31 +462,31 @@ func (r *fakeChatRepo) RemovePin(_ context.Context, chatID, messageID string) (b
 
 // --- S3 ---
 
-type fakeStorage struct {
+type Storage struct {
 	mu      sync.Mutex
 	objects map[string]int64 // key - размер
 }
 
-func newFakeStorage() *fakeStorage {
-	return &fakeStorage{objects: map[string]int64{}}
+func NewStorage() *Storage {
+	return &Storage{objects: map[string]int64{}}
 }
 
-// upload имитирует загрузку файла клиентом по подписанной ссылке
-func (s *fakeStorage) upload(key string, size int64) {
+// Upload имитирует загрузку файла клиентом по подписанной ссылке
+func (s *Storage) Upload(key string, size int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.objects[key] = size
 }
 
-func (s *fakeStorage) PresignPut(_ context.Context, key string, _ time.Duration) (string, error) {
+func (s *Storage) PresignPut(_ context.Context, key string, _ time.Duration) (string, error) {
 	return "http://s3.test/put/" + key, nil
 }
 
-func (s *fakeStorage) PresignGet(_ context.Context, key string, _ time.Duration) (string, error) {
+func (s *Storage) PresignGet(_ context.Context, key string, _ time.Duration) (string, error) {
 	return "http://s3.test/get/" + key, nil
 }
 
-func (s *fakeStorage) Size(_ context.Context, key string) (int64, error) {
+func (s *Storage) Size(_ context.Context, key string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

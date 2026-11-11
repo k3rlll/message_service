@@ -3,6 +3,8 @@ package ws
 import (
 	"context"
 	"log/slog"
+
+	"main/internal/metrics"
 )
 
 // Hub хранит активные соединения и раздает им сообщения.
@@ -81,6 +83,8 @@ func (h *Hub) Run(ctx context.Context) {
 				h.users[client.userID] = make(map[*Client]struct{})
 			}
 			h.users[client.userID][client] = struct{}{}
+			metrics.WSConnections.Inc()
+			metrics.WSUsers.Set(float64(len(h.users)))
 
 			h.logger.DebugContext(ctx, "Client registered",
 				"op", op, "userID", client.userID)
@@ -96,6 +100,7 @@ func (h *Hub) Run(ctx context.Context) {
 				// Если соединений нет - пользователь оффлайн на этом экземпляре сервера
 				for client := range h.users[userID] {
 					if client.enqueue(task.Payload) {
+						metrics.FramesDelivered.Inc()
 						continue
 					}
 
@@ -104,6 +109,7 @@ func (h *Hub) Run(ctx context.Context) {
 					h.logger.WarnContext(ctx, "Slow client detected, disconnecting",
 						"op", op, "userID", client.userID)
 
+					metrics.WSSlowClients.Inc()
 					h.remove(client)
 					client.Close()
 				}
@@ -118,8 +124,15 @@ func (h *Hub) remove(client *Client) {
 		return
 	}
 
+	if _, exists := connections[client]; !exists {
+		return
+	}
+
 	delete(connections, client)
 	if len(connections) == 0 {
 		delete(h.users, client.userID)
 	}
+
+	metrics.WSConnections.Dec()
+	metrics.WSUsers.Set(float64(len(h.users)))
 }

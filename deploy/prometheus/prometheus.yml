@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Каждый экземпляр сервиса находится через DNS: имя "app" резолвится во все реплики.
+  # Метрики отдаются на служебном порту 8081, который наружу не публикуется.
+  - job_name: message_service
+    dns_sd_configs:
+      - names: [ app ]
+        type: A
+        port: 8081
+        refresh_interval: 10s

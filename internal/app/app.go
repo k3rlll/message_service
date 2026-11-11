@@ -37,6 +37,17 @@ func NewServer(logger *slog.Logger, handlers Handlers, deps RouteDeps) *echo.Ech
 	e.Use(middleware.RequestID())
 	e.Use(mddlwr.RequestIDToContextMiddleware())
 	e.Use(middleware.CORS())
+	if deps.Instance != "" {
+		// Какой экземпляр обработал запрос: видно, как балансировщик раскидывает нагрузку
+		e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+			return func(c echo.Context) error {
+				c.Response().Header().Set("X-Instance", deps.Instance)
+				return next(c)
+			}
+		})
+	}
+	// Метрики снаружи логгера запросов: так в них попадает итоговый статус ответа
+	e.Use(mddlwr.MetricsMiddleware())
 	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
 		// Логируем путь без query-строки: в ней может быть токен WebSocket-подключения
 		LogURIPath:  true,

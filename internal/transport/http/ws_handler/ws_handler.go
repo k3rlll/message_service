@@ -74,18 +74,25 @@ func (b *Backend) SendMessage(ctx context.Context, userID string, p ws.SendMessa
 }
 
 type Handler struct {
-	logger  *slog.Logger
-	hub     *ws.Hub
-	backend ws.Backend
-	cfg     configs.WebsocketConfig
+	logger   *slog.Logger
+	hub      *ws.Hub
+	backend  ws.Backend
+	cfg      configs.WebsocketConfig
+	instance string
 }
 
-func NewHandler(logger *slog.Logger, hub *ws.Hub, backend ws.Backend, cfg configs.WebsocketConfig) *Handler {
+func NewHandler(
+	logger *slog.Logger,
+	hub *ws.Hub,
+	backend ws.Backend,
+	cfg configs.WebsocketConfig,
+	instance string) *Handler {
 	return &Handler{
-		logger:  logger,
-		hub:     hub,
-		backend: backend,
-		cfg:     cfg,
+		logger:   logger,
+		hub:      hub,
+		backend:  backend,
+		cfg:      cfg,
+		instance: instance,
 	}
 }
 
@@ -111,7 +118,7 @@ func (h *Handler) WS(c echo.Context) error {
 
 	h.logger.InfoContext(ctx, "WebSocket connection established", "op", op, "userID", userID)
 
-	client := ws.NewClient(ctx, h.hub, conn, userID, h.cfg.ClientChanSize, h.backend, h.logger)
+	client := ws.NewClient(ctx, h.hub, conn, userID, h.cfg.ClientChanSize, h.backend, h.instance, h.logger)
 
 	// Блокирующий вызов: хэндлер висит здесь, пока клиент не отключится
 	client.Serve(c.QueryParam("last_event_id"))

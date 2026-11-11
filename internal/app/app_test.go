@@ -466,12 +466,12 @@ func TestAttachments(t *testing.T) {
 	}
 
 	// Загрузили больше, чем разрешено: размер берется из хранилища, а не со слов клиента
-	e.storage.upload(upload.Key, maxFileSize+1)
+	e.storage.Upload(upload.Key, maxFileSize+1)
 	if resp := send(upload.Key); resp.status != http.StatusBadRequest {
 		t.Fatalf("oversized attachment: status = %d, body: %s", resp.status, resp.body)
 	}
 
-	e.storage.upload(upload.Key, 10)
+	e.storage.Upload(upload.Key, 10)
 	resp := send(upload.Key)
 	if resp.status != http.StatusCreated {
 		t.Fatalf("send with attachment: status = %d, body: %s", resp.status, resp.body)
@@ -483,7 +483,7 @@ func TestAttachments(t *testing.T) {
 
 	// Ключ из другого чата прикрепить нельзя
 	foreignKey := "chats/" + other.ID + "/" + ulid.Make().String() + "/secret.pdf"
-	e.storage.upload(foreignKey, 10)
+	e.storage.Upload(foreignKey, 10)
 	if resp := send(foreignKey); resp.status != http.StatusBadRequest {
 		t.Fatalf("foreign attachment: status = %d, body: %s", resp.status, resp.body)
 	}

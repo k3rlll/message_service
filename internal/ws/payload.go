@@ -66,6 +66,8 @@ type errorPayload struct {
 
 type connectedPayload struct {
 	UserID string `json:"user_id"`
+	// Экземпляр сервиса, обслуживающий соединение
+	Instance string `json:"instance,omitempty"`
 	// Позиция в потоке событий на момент подключения
 	LastEventID string `json:"last_event_id"`
 	// true - догрузить пропущенные события не удалось (клиент отстал слишком сильно).
