@@ -1,19 +1,41 @@
 env: "development"
 
+server:
+  shutdown_timeout: "10s"
+
 mongo:
   initialization_timeout: "30s"
   connect_timeout: "10s"
 
 websocket:
-  compression_threshold: 512 # В байтах, например 512 для отключения компрессии для сообщений меньше 512 байт
+  compression_threshold: 512 # В байтах: сообщения меньше 512 байт не сжимаются
   insecure_skip_verify: true # В проде замените на проверку Origin!
-  client_chan_size: 256 # Размер буфера канала для отправки сообщений клиенту, например 256
-
-
-jwt:
-  ttl: 120 # В минутах, например 120 для 2 часов
+  client_chan_size: 256 # Размер буфера канала отправки сообщений клиенту
+  max_message_size: 16384 # Максимальный размер входящего фрейма в байтах
 
 in_memory_cache:
-  expiry_minutes: "5m"
+  ttl: "5m"
   max_size: 1000
-  initial_capacity: 1000
+  initial_capacity: 100
+
+events:
+  stream_max_len: 10000 # Примерный размер потока событий в Redis
+  replay_limit: 500 # Сколько событий максимум догружается после переподключения
+
+presence:
+  ttl: "75s" # Должно быть больше интервала PING (30 секунд)
+  typing_ttl: "3s"
+
+# Лимиты на пользователя. limit: 0 отключает ограничение.
+rate_limit:
+  http:
+    limit: 300
+    window: "1m"
+  messages:
+    limit: 30
+    window: "10s"
+
+s3:
+  upload_url_ttl: "15m"
+  download_url_ttl: "1h"
+  max_file_size: 52428800 # 50 МБ

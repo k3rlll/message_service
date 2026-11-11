@@ -1,58 +1,71 @@
-package middleware
+package jwt
 
 import (
-	"time"
+	"crypto/rsa"
+	"errors"
+	"fmt"
+	"os"
 
-	"github.com/golang-jwt/jwt/v5"
+	domain "main/internal/domain/token_entity"
+
+	jwtlib "github.com/golang-jwt/jwt/v5"
 	"github.com/oklog/ulid/v2"
 )
 
-type JWTManager struct {
-	secretKey      string
-	accessTokenTTL int
+// Verifier проверяет access-токены, выпущенные сервисом авторизации.
+//
+// Токены подписаны RS256: сервис авторизации подписывает приватным ключом,
+// а этот сервис знает только публичный, поэтому проверить токен может,
+// а выпустить - нет.
+//
+// Ожидаемые claims: sub - ID пользователя (ULID), exp - время истечения.
+type Verifier struct {
+	publicKey *rsa.PublicKey
 }
 
-func NewJWTManager(secretKey string, tokenTTL int) *JWTManager {
-	return &JWTManager{
-		secretKey:      secretKey,
-		accessTokenTTL: tokenTTL,
-	}
+func NewVerifier(publicKey *rsa.PublicKey) *Verifier {
+	return &Verifier{publicKey: publicKey}
 }
 
-// NewAccessToken generates a new JWT access token for the given user ID.
-func (Manager *JWTManager) NewAccessToken(userID ulid.ULID) (string, error) {
-	jwtClaims := jwt.NewWithClaims(jwt.SigningMethodHS256, &jwt.MapClaims{
-		"user_id": userID,
-		"exp":     time.Now().Add(time.Duration(Manager.accessTokenTTL) * time.Minute).Unix(),
-		"iat":     time.Now().Unix(),
-	})
-	tokenString, err := jwtClaims.SignedString([]byte(Manager.secretKey))
+// NewVerifierFromFile читает публичный RSA-ключ из PEM-файла
+func NewVerifierFromFile(path string) (*Verifier, error) {
+	pemBytes, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("read JWT public key: %w", err)
 	}
-	return tokenString, nil
+
+	publicKey, err := jwtlib.ParseRSAPublicKeyFromPEM(pemBytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse JWT public key %s: %w", path, err)
+	}
+
+	return NewVerifier(publicKey), nil
 }
 
 // VerifyAccessToken verifies the access token and returns the user ID if the token is valid.
-func (Manager *JWTManager) VerifyAccessToken(tokenString string) (userID ulid.ULID, err error) {
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrTokenMalformed
+// Returns token_entity.ErrTokenExpired or token_entity.ErrInvalidToken otherwise.
+func (v *Verifier) VerifyAccessToken(tokenString string) (string, error) {
+	claims := &jwtlib.RegisteredClaims{}
+
+	_, err := jwtlib.ParseWithClaims(
+		tokenString,
+		claims,
+		func(*jwtlib.Token) (any, error) { return v.publicKey, nil },
+		// Жестко фиксируем алгоритм: иначе возможна подмена на HS256,
+		// где публичный ключ сработал бы как секрет
+		jwtlib.WithValidMethods([]string{jwtlib.SigningMethodRS256.Alg()}),
+		jwtlib.WithExpirationRequired(),
+	)
+	if err != nil {
+		if errors.Is(err, jwtlib.ErrTokenExpired) {
+			return "", domain.ErrTokenExpired
 		}
-		return []byte(Manager.secretKey), nil
-	})
-	if err != nil {
-		return ulid.Zero, err
-	}
-	sub, err := token.Claims.GetSubject()
-	if err != nil || sub == "" {
-		return ulid.Zero, jwt.ErrTokenMalformed
+		return "", domain.ErrInvalidToken
 	}
 
-	userID, err = ulid.Parse(sub)
-	if err != nil {
-		return ulid.Zero, err
+	if _, err := ulid.ParseStrict(claims.Subject); err != nil {
+		return "", domain.ErrInvalidToken
 	}
 
-	return userID, nil
+	return claims.Subject, nil
 }

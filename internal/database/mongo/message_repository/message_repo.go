@@ -1,4 +1,4 @@
-package repository
+package message_repository
 
 import (
 	"context"
@@ -10,58 +10,64 @@ import (
 	domain "main/internal/domain/message_entity"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-const (
-	daysForSearch = -60
-)
+// Поиск ограничен последними 60 днями для экономии ресурсов БД
+const searchWindow = 60 * 24 * time.Hour
 
+// SaveMessage сохраняет сообщение. Если сообщение с таким клиентским ID
+// уже есть, возвращает ErrDuplicate.
 func (r *MessageRepository) SaveMessage(ctx context.Context, msg *domain.Message) error {
 	const op = "MessageRepository.SaveMessage"
-	r.logger.InfoContext(
-		ctx, "Saving message to database",
-		"op", op,
-		"chatID", msg.ChatID,
-		"senderID", msg.SenderID)
 
-	_, err := r.coll.InsertOne(ctx, msg)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			r.logger.ErrorContext(
-				ctx, "op", op,
-				"Database operation timed out", "error", err)
-			return domainComm.ErrDatabaseTimeout
-		}
-
-		// Например, ошибка лимита документа (16MB)
-		if mongo.IsDuplicateKeyError(err) {
-			r.logger.WarnContext(
-				ctx, "Duplicate message ID detected",
-				"op", op,
-				"chatID", msg.ChatID,
-				"senderID", msg.SenderID,
-			)
-			//TODO: Handle this case properly, maybe return a specific error to the usecase
-			// Если  есть уникальный индекс на ID сообщения
-			return nil // Или игнорируем если это повторная попытка
-		}
-
-		r.logger.ErrorContext(
-			ctx, "Failed to save message to database",
-			"op", op,
-			"chatID", msg.ChatID,
-			"senderID", msg.SenderID,
-			"error", err,
-		)
-		return fmt.Errorf("failed to save message: %w", domainComm.ErrInternal)
+	if _, err := r.coll.InsertOne(ctx, msg); err != nil {
+		return r.mapError(ctx, op, err, "chatID", msg.ChatID, "senderID", msg.SenderID)
 	}
-
 	return nil
 }
 
+// GetMessage возвращает сообщение чата по ID, включая удаленные
+func (r *MessageRepository) GetMessage(ctx context.Context, chatID, messageID string) (*domain.Message, error) {
+	const op = "MessageRepository.GetMessage"
+	return r.findOne(ctx, op, bson.M{"_id": messageID, "chat_id": chatID})
+}
+
+// GetMessageByClientID возвращает сообщение по клиентскому ID (ключу идемпотентности)
+func (r *MessageRepository) GetMessageByClientID(
+	ctx context.Context,
+	chatID string,
+	senderID string,
+	clientMessageID string,
+) (*domain.Message, error) {
+	const op = "MessageRepository.GetMessageByClientID"
+	return r.findOne(ctx, op, bson.M{
+		"chat_id":       chatID,
+		"sender_id":     senderID,
+		"client_msg_id": clientMessageID,
+	})
+}
+
+// GetMessages возвращает неудаленные сообщения чата по списку ID, от новых к старым
+func (r *MessageRepository) GetMessages(ctx context.Context, chatID string, messageIDs []string) ([]domain.Message, error) {
+	const op = "MessageRepository.GetMessages"
+
+	if len(messageIDs) == 0 {
+		return []domain.Message{}, nil
+	}
+
+	filter := bson.M{
+		"_id":        bson.M{"$in": messageIDs},
+		"chat_id":    chatID,
+		"deleted_at": notDeleted,
+	}
+	return r.find(ctx, op, chatID, filter, int64(len(messageIDs)))
+}
+
+// ListMessages возвращает сообщения чата от новых к старым.
+// Если anchorID не пустой, возвращаются только сообщения старше него.
+// Удаленные сообщения остаются в выдаче как "надгробия".
 func (r *MessageRepository) ListMessages(
 	ctx context.Context,
 	chatID string,
@@ -71,47 +77,15 @@ func (r *MessageRepository) ListMessages(
 	const op = "MessageRepository.ListMessages"
 
 	filter := bson.M{"chat_id": chatID}
-
 	if anchorID != "" {
-		objID, err := primitive.ObjectIDFromHex(anchorID)
-		if err != nil {
-			return nil, domainComm.ErrInvalidInput
-		}
-		filter["_id"] = bson.M{"$lt": objID}
-
+		// ULID сортируется лексикографически, поэтому строковое сравнение корректно
+		filter["_id"] = bson.M{"$lt": anchorID}
 	}
 
-	opt := options.Find().
-		SetSort(bson.D{{Key: "_id", Value: -1}}). // Новые сообщения первыми
-		SetLimit(limit)
-
-	cur, err := r.coll.Find(ctx, filter, opt)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			r.logger.ErrorContext(ctx, "database operation timed out",
-				"op", op, "chatID", chatID, "error", err)
-			return nil, fmt.Errorf("%s: %w", op, domainComm.ErrDatabaseTimeout)
-		}
-
-		r.logger.ErrorContext(ctx, "failed to execute find query",
-			"op", op, "chatID", chatID, "error", err)
-		return nil, fmt.Errorf("%s: %w", op, domainComm.ErrInternal)
-	}
-	defer cur.Close(ctx) // Обязательно освобождаем курсор
-
-	var messages []domain.Message
-	if err = cur.All(ctx, &messages); err != nil {
-		r.logger.ErrorContext(ctx, "failed to decode cursor results",
-			"op", op, "chatID", chatID, "error", err)
-		return nil, fmt.Errorf("%s: %w", op, domainComm.ErrInternal)
-	}
-
-	r.logger.DebugContext(ctx, "messages successfully retrieved",
-		"op", op, "chatID", chatID, "count", len(messages))
-
-	return messages, nil
+	return r.find(ctx, op, chatID, filter, limit)
 }
 
+// SearchMessages ищет текстовые сообщения чата по полнотекстовому индексу.
 func (r *MessageRepository) SearchMessages(
 	ctx context.Context,
 	chatID string,
@@ -119,139 +93,226 @@ func (r *MessageRepository) SearchMessages(
 	anchorID string,
 	limit int64,
 ) ([]domain.Message, error) {
-
 	const op = "MessageRepository.SearchMessages"
 
-	// Формируем базовый фильтр
 	filter := bson.M{
-		"chat_id": chatID,
-		"type":    "text",
-		"$text":   bson.M{"$search": searchText},
-		// Ограничение поиска последними 60 днями
-		// - отличная практика для экономии ресурсов БД!
-		"created_at": bson.M{"$gte": time.Now().Add(daysForSearch * 24 * time.Hour)},
+		"chat_id":    chatID,
+		"type":       domain.TypeText, // нужно, чтобы запрос попал в частичный текстовый индекс
+		"$text":      bson.M{"$search": searchText},
+		"deleted_at": notDeleted,
+		"created_at": bson.M{"$gte": time.Now().UTC().Add(-searchWindow)},
 	}
-
-	// Добавляем якорь только если он передан
 	if anchorID != "" {
 		filter["_id"] = bson.M{"$lt": anchorID}
 	}
 
-	// Настраиваем опции выборки
-	opts := options.Find().
-		SetSort(bson.D{{Key: "_id", Value: -1}}). // Сортируем от новых к старым
-		SetLimit(limit)
-
-	cursor, err := r.coll.Find(ctx, filter, opts)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			r.logger.ErrorContext(ctx, "database operation timed out",
-				"op", op, "chatID", chatID, "error", err)
-
-			return nil, fmt.Errorf("%s: %w", op, domainComm.ErrDatabaseTimeout)
-		}
-
-		r.logger.ErrorContext(ctx, "failed to execute text search query",
-			"op", op, "chatID", chatID, "error", err)
-
-		return nil, fmt.Errorf("%s: %w", op, domainComm.ErrInternal)
-	}
-	defer cursor.Close(ctx)
-
-	var messages []domain.Message
-	if err = cursor.All(ctx, &messages); err != nil {
-		r.logger.ErrorContext(ctx, "failed to decode search results",
-			"op", op, "chatID", chatID, "error", err)
-		return nil, fmt.Errorf("%s: %w", op, domainComm.ErrInternal)
-	}
-
-	r.logger.DebugContext(ctx, "search query executed successfully",
-		"op", op, "chatID", chatID, "found", len(messages))
-
-	return messages, nil
+	return r.find(ctx, op, chatID, filter, limit)
 }
 
+// CountUnread считает чужие неудаленные сообщения чата новее afterID.
+// Считает не больше limit: точное число больших значений клиенту не нужно.
+func (r *MessageRepository) CountUnread(
+	ctx context.Context,
+	chatID string,
+	userID string,
+	afterID string,
+	limit int64,
+) (int64, error) {
+	const op = "MessageRepository.CountUnread"
+
+	filter := bson.M{
+		"chat_id":    chatID,
+		"sender_id":  bson.M{"$ne": userID},
+		"deleted_at": notDeleted,
+	}
+	if afterID != "" {
+		filter["_id"] = bson.M{"$gt": afterID}
+	}
+
+	count, err := r.coll.CountDocuments(ctx, filter, options.Count().SetLimit(limit))
+	if err != nil {
+		return 0, r.mapError(ctx, op, err, "chatID", chatID)
+	}
+	return count, nil
+}
+
+// UpdateMessage меняет текст сообщения и возвращает обновленное сообщение.
+// Изменить сообщение может только его автор. Удаленное сообщение изменить нельзя.
 func (r *MessageRepository) UpdateMessage(
 	ctx context.Context,
 	userID string,
 	chatID string,
 	messageID string,
 	content string,
-) error {
+) (*domain.Message, error) {
 	const op = "MessageRepository.UpdateMessage"
 
-	// Фильтр защищает от изменения чужих сообщений
 	filter := bson.M{
-		"_id":       messageID,
-		"chat_id":   chatID,
-		"sender_id": userID, // Только автор может изменить сообщение
+		"_id":        messageID,
+		"chat_id":    chatID,
+		"sender_id":  userID,
+		"deleted_at": notDeleted,
 	}
-
 	update := bson.M{
 		"$set": bson.M{
 			"content":    content,
 			"updated_at": time.Now().UTC(),
-			"is_edited":  true, // Помечать сообщение как измененное
+			"is_edited":  true,
 		},
 	}
 
-	res, err := r.coll.UpdateOne(ctx, filter, update)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			r.logger.ErrorContext(ctx, "database operation timed out",
-				"op", op, "messageID", messageID, "error", err)
-			return fmt.Errorf("%s: %w", op, domainComm.ErrDatabaseTimeout)
-		}
-
-		r.logger.ErrorContext(ctx, "failed to execute update query",
-			"op", op, "messageID", messageID, "error", err)
-		return fmt.Errorf("%s: %w", op, domainComm.ErrInternal)
-	}
-
-	// Если MatchedCount == 0  значит сообщения нет или юзер не является его автором.
-	if res.MatchedCount == 0 {
-		r.logger.DebugContext(ctx, "message not found or access denied during update",
-			"op", op, "messageID", messageID, "userID", userID)
-		return fmt.Errorf("%s: %w", op, domainComm.ErrNotFound)
-	}
-
-	r.logger.DebugContext(ctx, "message successfully updated",
-		"op", op, "messageID", messageID)
-
-	return nil
+	return r.findOneAndUpdate(ctx, op, filter, update)
 }
 
-func (r *MessageRepository) DeleteMessages(
+// SoftDeleteMessages помечает сообщения удаленными и стирает их содержимое.
+// Если senderID не пустой, удаляются только сообщения этого автора.
+// Возвращает ID реально удаленных сообщений.
+func (r *MessageRepository) SoftDeleteMessages(
 	ctx context.Context,
 	chatID string,
 	messageIDs []string,
-) error {
-	const op = "MessageRepository.DeleteMessages"
+	senderID string,
+) ([]string, error) {
+	const op = "MessageRepository.SoftDeleteMessages"
 
 	filter := bson.M{
-		"chat_id": chatID,
-		"_id":     bson.M{"$in": messageIDs},
+		"_id":        bson.M{"$in": messageIDs},
+		"chat_id":    chatID,
+		"deleted_at": notDeleted,
+	}
+	if senderID != "" {
+		filter["sender_id"] = senderID
 	}
 
-	res, err := r.coll.DeleteMany(ctx, filter)
+	// Сначала выясняем, какие именно сообщения будут удалены:
+	// их ID нужны для события и обновления превью чата
+	cur, err := r.coll.Find(ctx, filter, options.Find().SetProjection(bson.M{"_id": 1}))
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			r.logger.ErrorContext(ctx, "database operation timed out",
-				"op", op, "chatID", chatID, "error", err)
-			return fmt.Errorf("%s: %w", op, domainComm.ErrDatabaseTimeout)
-		}
-
-		r.logger.ErrorContext(ctx, "failed to execute delete query",
-			"op", op, "chatID", chatID, "error", err)
-		return fmt.Errorf("%s: %w", op, domainComm.ErrInternal)
+		return nil, r.mapError(ctx, op, err, "chatID", chatID)
 	}
 
-	r.logger.DebugContext(ctx, "messages deleted",
-		"op", op,
-		"chatID", chatID,
-		"requested_count", len(messageIDs),
-		"deleted_count", res.DeletedCount,
-	)
+	var found []struct {
+		ID string `bson:"_id"`
+	}
+	if err := cur.All(ctx, &found); err != nil {
+		return nil, r.mapError(ctx, op, err, "chatID", chatID)
+	}
+	if len(found) == 0 {
+		return nil, nil
+	}
 
-	return nil
+	deletedIDs := make([]string, len(found))
+	for i, doc := range found {
+		deletedIDs[i] = doc.ID
+	}
+
+	now := time.Now().UTC()
+	update := bson.M{
+		"$set": bson.M{
+			"deleted_at": now,
+			"updated_at": now,
+			"content":    "",
+		},
+		"$unset": bson.M{
+			"attachments": "",
+			"reactions":   "",
+			"metadata":    "",
+		},
+	}
+
+	// deleted_at в фильтре защищает от повторного удаления при гонке
+	_, err = r.coll.UpdateMany(ctx, bson.M{
+		"_id":        bson.M{"$in": deletedIDs},
+		"deleted_at": notDeleted,
+	}, update)
+	if err != nil {
+		return nil, r.mapError(ctx, op, err, "chatID", chatID)
+	}
+
+	return deletedIDs, nil
+}
+
+// AddReaction добавляет реакцию и возвращает обновленное сообщение.
+// Повторное добавление той же реакции ничего не меняет.
+func (r *MessageRepository) AddReaction(
+	ctx context.Context,
+	chatID string,
+	messageID string,
+	reaction domain.Reaction,
+) (*domain.Message, error) {
+	const op = "MessageRepository.AddReaction"
+
+	return r.findOneAndUpdate(ctx, op,
+		bson.M{"_id": messageID, "chat_id": chatID, "deleted_at": notDeleted},
+		bson.M{"$addToSet": bson.M{"reactions": reaction}},
+	)
+}
+
+// RemoveReaction убирает реакцию и возвращает обновленное сообщение
+func (r *MessageRepository) RemoveReaction(
+	ctx context.Context,
+	chatID string,
+	messageID string,
+	reaction domain.Reaction,
+) (*domain.Message, error) {
+	const op = "MessageRepository.RemoveReaction"
+
+	return r.findOneAndUpdate(ctx, op,
+		bson.M{"_id": messageID, "chat_id": chatID, "deleted_at": notDeleted},
+		bson.M{"$pull": bson.M{"reactions": reaction}},
+	)
+}
+
+func (r *MessageRepository) findOne(ctx context.Context, op string, filter bson.M) (*domain.Message, error) {
+	var msg domain.Message
+
+	if err := r.coll.FindOne(ctx, filter).Decode(&msg); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, fmt.Errorf("%s: %w", op, domainComm.ErrNotFound)
+		}
+		return nil, r.mapError(ctx, op, err)
+	}
+	return &msg, nil
+}
+
+func (r *MessageRepository) findOneAndUpdate(
+	ctx context.Context,
+	op string,
+	filter bson.M,
+	update bson.M,
+) (*domain.Message, error) {
+	var msg domain.Message
+
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	if err := r.coll.FindOneAndUpdate(ctx, filter, update, opts).Decode(&msg); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, fmt.Errorf("%s: %w", op, domainComm.ErrNotFound)
+		}
+		return nil, r.mapError(ctx, op, err)
+	}
+	return &msg, nil
+}
+
+func (r *MessageRepository) find(
+	ctx context.Context,
+	op string,
+	chatID string,
+	filter bson.M,
+	limit int64,
+) ([]domain.Message, error) {
+	opts := options.Find().
+		SetSort(bson.D{{Key: "_id", Value: -1}}). // новые сообщения первыми
+		SetLimit(limit)
+
+	cur, err := r.coll.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, r.mapError(ctx, op, err, "chatID", chatID)
+	}
+
+	messages := make([]domain.Message, 0, limit)
+	if err := cur.All(ctx, &messages); err != nil {
+		return nil, r.mapError(ctx, op, err, "chatID", chatID)
+	}
+
+	return messages, nil
 }

@@ -11,36 +11,59 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-type JWTManagerUsecase interface {
-	NewAccessToken(userID string) (string, error)
+const (
+	userIDContextKey = "user_id"
+	bearerPrefix     = "Bearer "
+	// Браузерный WebSocket API не умеет ставить заголовки,
+	// поэтому для /ws токен можно передать query-параметром
+	tokenQueryParam = "token"
+)
+
+type TokenVerifier interface {
 	VerifyAccessToken(tokenString string) (string, error)
 }
 
-func AuthMiddleware(jwtManager JWTManagerUsecase) echo.MiddlewareFunc {
+// UserID возвращает ID пользователя, положенный в контекст AuthMiddleware.
+// Пустая строка означает, что запрос не прошел аутентификацию.
+func UserID(c echo.Context) string {
+	userID, _ := c.Get(userIDContextKey).(string)
+	return userID
+}
+
+// AuthMiddleware проверяет access-токен из заголовка Authorization: Bearer <token>
+func AuthMiddleware(verifier TokenVerifier) echo.MiddlewareFunc {
+	return authMiddleware(verifier, false)
+}
+
+// WSAuthMiddleware дополнительно принимает токен из query-параметра token
+func WSAuthMiddleware(verifier TokenVerifier) echo.MiddlewareFunc {
+	return authMiddleware(verifier, true)
+}
+
+func authMiddleware(verifier TokenVerifier, allowQueryToken bool) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
+			var accessToken string
 
-			header := c.Request().Header.Get("authorization")
-			if header == "" ||
-				!strings.HasPrefix(header, "Bearer ") {
-				return &errHandler.AppError{
-					HTTPCode: http.StatusUnauthorized,
-					Code:     "INVALID_REQUEST",
-					Message:  "invalid request",
-				}
+			header := c.Request().Header.Get(echo.HeaderAuthorization)
+			switch {
+			case strings.HasPrefix(header, bearerPrefix):
+				accessToken = strings.TrimPrefix(header, bearerPrefix)
+			case allowQueryToken:
+				accessToken = c.QueryParam(tokenQueryParam)
 			}
 
-			accessToken := strings.TrimPrefix(header, "Bearer ")
+			if accessToken == "" {
+				return unauthorized("access token is missing")
+			}
 
-			userID, err := jwtManager.VerifyAccessToken(accessToken)
+			userID, err := verifier.VerifyAccessToken(accessToken)
 			if err != nil {
-				if errors.Is(err, domain.ErrInvalidToken) ||
-					errors.Is(err, domain.ErrTokenExpired) {
-					return &errHandler.AppError{
-						HTTPCode: http.StatusUnauthorized,
-						Code:     "INVALID_REQUEST",
-						Message:  "invalid request",
-					}
+				if errors.Is(err, domain.ErrTokenExpired) {
+					return unauthorized("access token expired")
+				}
+				if errors.Is(err, domain.ErrInvalidToken) {
+					return unauthorized("access token is invalid")
 				}
 
 				return &errHandler.AppError{
@@ -50,11 +73,18 @@ func AuthMiddleware(jwtManager JWTManagerUsecase) echo.MiddlewareFunc {
 				}
 			}
 
-			c.Set("userID", userID)
-			// c.Set("role", role)
+			c.Set(userIDContextKey, userID)
 
 			return next(c)
 		}
+	}
+}
+
+func unauthorized(message string) error {
+	return &errHandler.AppError{
+		HTTPCode: http.StatusUnauthorized,
+		Code:     "UNAUTHORIZED",
+		Message:  message,
 	}
 }
 

@@ -16,6 +16,8 @@ type ErrorResponse struct {
 type ErrorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Details - ошибки по полям при провале валидации: поле - причина
+	Details map[string]string `json:"details,omitempty"`
 }
 
 type AppError struct {
@@ -42,37 +44,57 @@ func CustomHTTPErrorHandler(err error, c echo.Context, logger *slog.Logger) {
 		},
 	}
 
-	// проверка на кастомную ошибку приложения
-	var appErr *AppError
-	if errors.As(err, &appErr) {
+	var (
+		appErr *AppError
+		he     *echo.HTTPError
+	)
+
+	switch {
+	// кастомная ошибка приложения
+	case errors.As(err, &appErr):
 		httpCode = appErr.HTTPCode
 		resp.Error.Code = appErr.Code
 		resp.Error.Message = appErr.Message
-	} else {
-		//проверка стандартных HTTP ошибок Echo
-		var he *echo.HTTPError
-		if errors.As(err, &he) {
-			httpCode = he.Code
-			resp.Error.Message = fmt.Sprintf("%v", he.Message)
 
-			// маппинг кодов ошибок Echo на коды ошибок
-			switch he.Code {
-			case http.StatusBadRequest:
-				resp.Error.Code = "INVALID_REQUEST"
-			case http.StatusUnauthorized:
-				resp.Error.Code = "UNAUTHORIZED"
-			case http.StatusForbidden:
-				resp.Error.Code = "FORBIDDEN"
-			case http.StatusNotFound:
-				resp.Error.Code = "NOT_FOUND"
-			default:
-				resp.Error.Code = "INTERNAL_ERROR"
-			}
+	// стандартная HTTP ошибка Echo
+	case errors.As(err, &he):
+		httpCode = he.Code
+		resp.Error.Code = codeForStatus(he.Code)
+
+		if details, ok := he.Message.(map[string]string); ok {
+			resp.Error.Message = "validation failed"
+			resp.Error.Details = details
 		} else {
-			logger.Error("Unhandled error", slog.Any("error", err))
+			resp.Error.Message = fmt.Sprintf("%v", he.Message)
 		}
+
+	default:
+		logger.ErrorContext(c.Request().Context(), "Unhandled error", slog.Any("error", err))
 	}
 
-	// отправляем JSON ответ клиенту
-	c.JSON(httpCode, resp)
+	if err := c.JSON(httpCode, resp); err != nil {
+		logger.ErrorContext(c.Request().Context(), "Failed to write error response",
+			slog.Any("error", err))
+	}
+}
+
+func codeForStatus(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "INVALID_REQUEST"
+	case http.StatusUnauthorized:
+		return "UNAUTHORIZED"
+	case http.StatusForbidden:
+		return "FORBIDDEN"
+	case http.StatusNotFound:
+		return "NOT_FOUND"
+	case http.StatusMethodNotAllowed:
+		return "METHOD_NOT_ALLOWED"
+	case http.StatusUnprocessableEntity:
+		return "VALIDATION_ERROR"
+	case http.StatusServiceUnavailable:
+		return "SERVICE_UNAVAILABLE"
+	default:
+		return "INTERNAL_ERROR"
+	}
 }

@@ -9,17 +9,14 @@ services:
     restart: always
     networks:
       - app-network
-    env_file:
-      - .env
     ports:
-      - "${MONGO_PORT}:${MONGO_PORT}"
+      - "${MONGO_PORT}:27017"
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
       - MONGO_INITDB_DATABASE=${MONGO_DATABASE}
-      - MONGO_INITDB_AUTH_MECHANISM=${MONGO_AUTH_MECHANISM}
     volumes:
-      - ${ROOT_DIR}/out/mongodb_data:/data/mongodb
+      - mongodb_data:/data/db
     command:
       - "--auth"
       - "--wiredTigerCacheSizeGB=0.5"
@@ -29,6 +26,27 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: message_redis
+    restart: always
+    networks:
+      - app-network
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    # Пароль включаем только если он задан в .env
+    command:
+      - sh
+      - -c
+      - 'if [ -n "$$REDIS_PASSWORD" ]; then exec redis-server --requirepass "$$REDIS_PASSWORD"; else exec redis-server; fi'
+    healthcheck:
+      test: [ "CMD-SHELL", 'redis-cli --no-auth-warning $${REDIS_PASSWORD:+-a "$$REDIS_PASSWORD"} ping | grep -q PONG' ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   app:
     build:
@@ -43,10 +61,17 @@ services:
     env_file:
       - .env
     environment:
-      - MONGO_HOST=mongodb
-      - MONGO_PORT=${MONGO_PORT}
+      # Внутри сети compose сервисы доступны по именам, а не по localhost
+      - MONGO_URI=mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017
+      - REDIS_ADDR=redis:6379
+      - JWT_PUBLIC_KEY_PATH=/app/keys/jwt_public.pem
+    volumes:
+      # Публичный ключ сервиса авторизации. Локально его создает: go run ./cmd/devtoken
+      - ./keys/jwt_public.pem:/app/keys/jwt_public.pem:ro
     depends_on:
       mongodb:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:

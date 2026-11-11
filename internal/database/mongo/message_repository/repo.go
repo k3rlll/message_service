@@ -1,18 +1,20 @@
-package repository
+package message_repository
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
+
+	mongodb "main/internal/database/mongo"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-var (
-	messagesCollection = "messages"
-)
+const messagesCollection = "messages"
+
+// notDeleted - условие фильтра "сообщение не удалено"
+var notDeleted = bson.M{"$exists": false}
 
 type MessageRepository struct {
 	coll   *mongo.Collection
@@ -26,35 +28,52 @@ func NewMessageRepository(db *mongo.Database, logger *slog.Logger) *MessageRepos
 	}
 }
 
-// create indexes to speed up operations
+// EnsureIndexes создает индексы коллекции сообщений. Операция идемпотентна.
 func (r *MessageRepository) EnsureIndexes(ctx context.Context) error {
-	//
 	const op = "MessageRepository.EnsureIndexes"
 
-	indexModel := mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "chat_id", Value: 1},
-			{Key: "content", Value: "text"},
+	indexes := []mongo.IndexModel{
+		{
+			// Листинг сообщений чата с курсорной пагинацией по _id (ULID)
+			Keys: bson.D{
+				{Key: "chat_id", Value: 1},
+				{Key: "_id", Value: -1},
+			},
 		},
-		Options: options.Index().SetPartialFilterExpression(
-			bson.D{{Key: "type", Value: "text"}},
-		),
+		{
+			// Полнотекстовый поиск внутри чата, только по текстовым сообщениям
+			Keys: bson.D{
+				{Key: "chat_id", Value: 1},
+				{Key: "content", Value: "text"},
+			},
+			Options: options.Index().SetPartialFilterExpression(
+				bson.D{{Key: "type", Value: "text"}},
+			),
+		},
+		{
+			// Идемпотентность отправки: один клиентский ID - одно сообщение.
+			// Индекс частичный, потому что клиентский ID необязателен.
+			Keys: bson.D{
+				{Key: "chat_id", Value: 1},
+				{Key: "sender_id", Value: 1},
+				{Key: "client_msg_id", Value: 1},
+			},
+			Options: options.Index().
+				SetUnique(true).
+				SetPartialFilterExpression(bson.D{
+					{Key: "client_msg_id", Value: bson.D{{Key: "$type", Value: "string"}}},
+				}),
+		},
 	}
 
-	//
-
-	_, err := r.coll.Indexes().CreateOne(ctx, indexModel)
-	if err != nil {
-		r.logger.ErrorContext(
-			ctx,
-			"op", op,
-			"failed to create indexes for messages collection",
-			slog.String("error", err.Error()))
-		return fmt.Errorf("failed to create indexes for messages collection: %w", err)
+	if _, err := r.coll.Indexes().CreateMany(ctx, indexes); err != nil {
+		return r.mapError(ctx, op, err)
 	}
 
-	r.logger.DebugContext(
-		ctx, "op", op,
-		"indexes created successfully for messages collection")
+	r.logger.DebugContext(ctx, "indexes ensured for messages collection", "op", op)
 	return nil
+}
+
+func (r *MessageRepository) mapError(ctx context.Context, op string, err error, attrs ...any) error {
+	return mongodb.MapError(ctx, r.logger, op, err, attrs...)
 }

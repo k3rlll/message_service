@@ -2,22 +2,29 @@ package cache_usecase
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"log/slog"
 
+	domainComm "main/internal/domain"
 	domainChat "main/internal/domain/chat_entity"
 
 	"github.com/maypok86/otter/v2"
 )
 
-type ChatMembers map[string]struct{} // пустая структура для экономии памяти
+// ChatMembers - участники чата: userID - роль
+type ChatMembers map[string]string
 
 type ChatRepository interface {
-	IsUserInChat(ctx context.Context, userID, chatID string) (bool, error)
+	ChatMembers(ctx context.Context, chatID string) ([]domainChat.Member, error)
 }
 
+// InMemoryCache кэширует состав и роли участников чата.
+// Нужен на горячем пути: проверка прав на каждое сообщение и рассылка событий.
+//
+// Кэш локален для экземпляра сервиса. При изменении состава чата его сбрасывает
+// шина событий на каждом экземпляре, TTL - страховка на случай потери события.
 type InMemoryCache struct {
-	client   *otter.Cache[string, ChatMembers] // chatID - userIDs
+	client   *otter.Cache[string, ChatMembers]
 	logger   *slog.Logger
 	chatRepo ChatRepository
 }
@@ -33,77 +40,63 @@ func NewInMemoryCache(
 	}
 }
 
-func (c *InMemoryCache) IsUserInChat(ctx context.Context, userID, chatID string) (bool, error) {
-	const op = "InMemoryCache.IsUserInChat"
+// MemberRole возвращает роль пользователя в чате.
+// Если пользователь не участник, возвращает ErrAccessDenied,
+// если чата нет - chat_entity.ErrChatNotFound.
+func (c *InMemoryCache) MemberRole(ctx context.Context, userID, chatID string) (string, error) {
+	const op = "InMemoryCache.MemberRole"
 
-	c.logger.InfoContext(
-		ctx, "Checking if user is in chat",
-		"op", op,
-		"chatID", chatID,
-		"userID", userID)
+	members, err := c.members(ctx, chatID)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", op, err)
+	}
 
-	members, err := c.client.Get(ctx, chatID, otter.LoaderFunc[string, ChatMembers](
-		func(ctx context.Context, key string) (ChatMembers, error) {
-			isInChat, err := c.chatRepo.IsUserInChat(ctx, userID, chatID)
+	role, ok := members[userID]
+	if !ok {
+		return "", fmt.Errorf("%s: %w", op, domainComm.ErrAccessDenied)
+	}
+	return role, nil
+}
+
+// ChatUserIDs возвращает ID всех участников чата.
+func (c *InMemoryCache) ChatUserIDs(ctx context.Context, chatID string) ([]string, error) {
+	const op = "InMemoryCache.ChatUserIDs"
+
+	members, err := c.members(ctx, chatID)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+
+	userIDs := make([]string, 0, len(members))
+	for userID := range members {
+		userIDs = append(userIDs, userID)
+	}
+	return userIDs, nil
+}
+
+// Invalidate сбрасывает кэш участников чата.
+// Вызывать при любом изменении состава или ролей.
+func (c *InMemoryCache) Invalidate(chatID string) {
+	c.client.Invalidate(chatID)
+}
+
+// members возвращает состав чата из кэша, при промахе загружает его из репозитория.
+// Ошибки загрузки не кэшируются.
+func (c *InMemoryCache) members(ctx context.Context, chatID string) (ChatMembers, error) {
+	return c.client.Get(ctx, chatID, otter.LoaderFunc[string, ChatMembers](
+		func(ctx context.Context, chatID string) (ChatMembers, error) {
+			c.logger.DebugContext(ctx, "cache miss, loading chat members", "chatID", chatID)
+
+			list, err := c.chatRepo.ChatMembers(ctx, chatID)
 			if err != nil {
-				if errors.Is(err, domainChat.ErrChatNotFound) {
-					c.logger.InfoContext(
-						ctx, "Chat not found",
-						"op", op,
-						"chatID", chatID)
-					return ChatMembers{}, nil
-				}
-				if errors.Is(err, domainChat.ErrAccessDenied) {
-					c.logger.InfoContext(
-						ctx, "Access denied",
-						"op", op,
-						"chatID", chatID)
-					return ChatMembers{}, nil
-				}
-				//else
-				c.logger.ErrorContext(
-					ctx, "Failed to load chat members from repository",
-					"op", op,
-					"chatID", chatID,
-					"error", err)
-
-				return ChatMembers{}, err
+				return nil, err
 			}
 
-			if isInChat {
-				c.logger.InfoContext(
-					ctx, "Cache miss - user is in chat",
-					"op", op,
-					"chatID", chatID,
-					"userID", userID)
-				return ChatMembers{userID: {}}, nil
+			members := make(ChatMembers, len(list))
+			for _, member := range list {
+				members[member.UserID] = member.Role
 			}
-
-			c.logger.InfoContext(
-				ctx, "Cache miss - user is not in chat",
-				"op", op,
-				"chatID", chatID,
-				"userID", userID)
-
-			return ChatMembers{}, nil
+			return members, nil
 		},
 	))
-	if err != nil {
-		c.logger.InfoContext(
-			ctx, "Cache miss",
-			"op", op,
-			"chatID", chatID)
-		return false, nil
-	}
-
-	if _, ok := members[userID]; ok {
-		c.logger.InfoContext(
-			ctx, "Cache hit - user is in chat",
-			"op", op,
-			"chatID", chatID,
-			"userID", userID)
-		return true, nil
-	}
-
-	return false, nil
 }

@@ -1,31 +1,43 @@
-package http
+package message_handlers
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 
 	configs "main/internal/configs"
 	domainComm "main/internal/domain"
+	domainChat "main/internal/domain/chat_entity"
 	domain "main/internal/domain/message_entity"
+	mddlwr "main/internal/transport/middleware"
 	ws "main/internal/ws"
 
 	"github.com/coder/websocket"
 	"github.com/go-playground/validator/v10"
-	"github.com/go-redis/redis/v8"
 	"github.com/labstack/echo/v4"
 )
 
+const (
+	defaultPageLimit  = 20
+	maxDeleteMessages = 100
+)
+
 type messageUsecase interface {
-	SaveMessage(ctx context.Context, req domain.Message) error
+	SendMessage(
+		ctx context.Context,
+		senderID string,
+		chatID string,
+		msgType string,
+		content string,
+		metadata map[string]any) (*domain.Message, error)
 
 	ListMessages(
 		ctx context.Context,
+		userID string,
 		chatID string,
-		anchor string,
+		anchorID string,
 		limit int64) ([]domain.Message, bool, error)
 
 	DeleteMessages(
@@ -43,410 +55,259 @@ type messageUsecase interface {
 
 	SearchMessages(
 		ctx context.Context,
+		userID string,
 		chatID string,
 		searchText string,
 		anchorID string,
-		limit int64,
-	) ([]domain.Message, bool, error)
-}
-
-type redisUsecase interface {
-	PublishMessage(
-		ctx context.Context,
-		chatID string,
-		message domain.Message) error
-	//
-	SubscribeToChat(
-		ctx context.Context,
-		chatID string) (<-chan domain.Message, error)
+		limit int64) ([]domain.Message, bool, error)
 }
 
 type Handler struct {
-	echo         *echo.Echo
-	logger       *slog.Logger
-	usecase      messageUsecase
-	redisUsecase redisUsecase
-	cfg          configs.Config
+	logger  *slog.Logger
+	usecase messageUsecase
+	hub     *ws.Hub
+	wsCfg   configs.WebsocketConfig
 }
 
 func NewHandler(
-	echo *echo.Echo,
 	logger *slog.Logger,
 	usecase messageUsecase,
-	redisUsecase redisUsecase,
-	cfg configs.Config) *Handler {
+	hub *ws.Hub,
+	wsCfg configs.WebsocketConfig) *Handler {
 	return &Handler{
-		echo:         echo,
-		logger:       logger,
-		usecase:      usecase,
-		redisUsecase: redisUsecase,
-		cfg:          cfg,
+		logger:  logger,
+		usecase: usecase,
+		hub:     hub,
+		wsCfg:   wsCfg,
 	}
 }
 
 // DTO
 
-type SaveMessageRequest struct {
+// Отправитель берется из токена, а не из тела запроса.
+// Тип "system" клиенту недоступен: такие сообщения создает только сервер.
+type SendMessageRequest struct {
 	ChatID   string         `json:"chat_id" validate:"required,ulid"`
-	SenderID string         `json:"sender_id" validate:"required,ulid"`
-	Type     string         `json:"type" validate:"required,oneof=text image video audio system"`
-	Content  string         `json:"content" validate:"required"`
+	Type     string         `json:"type" validate:"required,oneof=text image video audio"`
+	Content  string         `json:"content" validate:"required,max=4000"`
 	Metadata map[string]any `json:"metadata"`
 }
 
 type ListMessagesRequest struct {
 	ChatID   string `query:"chat_id" validate:"required,ulid"`
-	AnchorID string `query:"anchor,ulid"` // optional, for pagination
+	AnchorID string `query:"anchor" validate:"omitempty,ulid"` // курсор: ID самого старого из уже загруженных сообщений
 	Limit    int64  `query:"limit" validate:"omitempty,min=1,max=100"`
 }
 
-type ListMessagesResponse struct {
+type MessagesResponse struct {
 	Messages []domain.Message `json:"messages"`
-	HasMore  bool             `json:"has_more"` // optional, indicates if there are more messages to fetch
+	HasMore  bool             `json:"has_more"` // есть ли еще страницы
 }
 
 type DeleteMessagesRequest struct {
-	ChatID     string   `query:"chat_id" validate:"required,uiid"`
-	MessageIDs []string `query:"message_ids" validate:"required,dive,uiid"`
+	ChatID     string   `query:"chat_id" validate:"required,ulid"`
+	MessageIDs []string `query:"message_ids" validate:"required,min=1,max=100,dive,ulid"`
 }
 
 type UpdateMessageRequest struct {
-	ChatID    string `param:"chat_id" validate:"required"`
-	MessageID string `param:"message_id" validate:"required"`
-	Content   string `json:"content" validate:"required,min=1,max=4000"`
+	MessageID string `param:"message_id" validate:"required,ulid"`
+	ChatID    string `json:"chat_id" validate:"required,ulid"`
+	Content   string `json:"content" validate:"required,max=4000"`
 }
 
 type SearchMessagesRequest struct {
-	ChatID   string `query:"chat_id" validate:"required,uiid"`
-	Text     string `query:"text" validate:"required"`
-	AnchorID string `query:"anchor_id"`
-	Limit    int64  `query:"limit" validate:"omitempty,min=1,max=50"`
+	ChatID   string `query:"chat_id" validate:"required,ulid"`
+	Text     string `query:"text" validate:"required,max=200"`
+	AnchorID string `query:"anchor" validate:"omitempty,ulid"`
+	Limit    int64  `query:"limit" validate:"omitempty,min=1,max=50"` // $text поиск тяжелее листинга, поэтому лимит ниже
 }
 
-type SearchMessagesResponse struct {
-	Messages []domain.Message `json:"messages"`
-	HasMore  bool             `json:"has_more"` // optional, indicates if there are more messages to fetch
-}
+// WS апгрейдит HTTP в WebSocket и обслуживает соединение.
+// GET /api/v1/ws
+func (h *Handler) WS(c echo.Context) error {
+	const op = "Handler.WS"
+	ctx := c.Request().Context()
+	userID := mddlwr.UserID(c)
 
-// Handler для WebSocket соединений. Апгрейдит HTTP в WS, создает клиента и регистрирует его в Хабе.
-func (h *Handler) WSHandler(hub *ws.Hub, rdb *redis.Client) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		op := "Handler.WSHandler"
-		userID := c.Get("user_id").(string)
-		ctx := c.Request().Context()
-
-		h.logger.InfoContext(
-			ctx, "WebSocket connection attempt",
-			"op", op,
-			"userID", userID,
-		)
-
-		// Апгрейд соединения
-		conn, err := websocket.Accept(c.Response(), c.Request(), &websocket.AcceptOptions{
-			InsecureSkipVerify: true, // Настроить OriginPatterns в проде!
-		})
-		if err != nil {
-			h.logger.ErrorContext(
-				ctx, "Failed to accept WebSocket connection",
-				"op", op,
-				"userID", userID,
-				"error", err,
-			)
-			return err // Ошибка рукопожатия
-		}
-
-		client := &ws.Client{
-			Hub:    hub,
-			Conn:   conn,
-			UserID: userID,
-			Send:   make(chan []byte, h.cfg.Websocket.ClientChanSize),
-		}
-		h.logger.DebugContext(
-			ctx, "WebSocket client created",
-			"op", op,
-			"client", client,
-		)
-
-		h.logger.InfoContext(
-			ctx, "WebSocket connection established",
-			"op", op,
-			"userID", userID,
-		)
-
-		// Регистрация в Хабе
-		hub.Register <- client
-
-		// Запускаем writePump в фоне
-		go client.WritePump(c.Request().Context())
-
-		// Запускаем readPump В ТЕКУЩЕЙ горутине - блокирующий вызов
-		// Хэндлер будет висеть здесь, пока клиент не отключится.
-		client.ReadPump(c.Request().Context(), rdb)
-
+	conn, err := websocket.Accept(c.Response(), c.Request(), &websocket.AcceptOptions{
+		InsecureSkipVerify:   h.wsCfg.InsecureSkipVerify,
+		CompressionMode:      websocket.CompressionNoContextTakeover,
+		CompressionThreshold: h.wsCfg.CompressionThreshold,
+	})
+	if err != nil {
+		// Accept уже сам отправил клиенту HTTP-ответ с ошибкой
+		h.logger.WarnContext(ctx, "Failed to accept WebSocket connection",
+			"op", op, "userID", userID, "error", err)
 		return nil
 	}
+	conn.SetReadLimit(h.wsCfg.MaxMessageSize)
+
+	h.logger.InfoContext(ctx, "WebSocket connection established",
+		"op", op, "userID", userID)
+
+	client := ws.NewClient(
+		ctx, h.hub, conn, userID, h.wsCfg.ClientChanSize, h.usecase, h.logger)
+
+	// Блокирующий вызов: хэндлер висит здесь, пока клиент не отключится
+	client.Serve()
+
+	return nil
 }
 
-// get messages/list?chat_id=xxx&anchor=xxx&limit=xxx
+// SendMessage отправляет сообщение в чат.
+// POST /api/v1/messages
+func (h *Handler) SendMessage(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	var req SendMessageRequest
+	if err := bindAndValidate(c, &req); err != nil {
+		return err
+	}
+
+	msg, err := h.usecase.SendMessage(
+		ctx, mddlwr.UserID(c), req.ChatID, req.Type, req.Content, req.Metadata)
+	if err != nil {
+		return h.mapError(ctx, "Handler.SendMessage", err)
+	}
+
+	return c.JSON(http.StatusCreated, msg)
+}
+
+// ListMessages возвращает страницу сообщений чата от новых к старым.
+// GET /api/v1/messages?chat_id=xxx&anchor=xxx&limit=xxx
 func (h *Handler) ListMessages(c echo.Context) error {
-	const op = "Handler.ListMessages"
 	ctx := c.Request().Context()
 
 	var req ListMessagesRequest
-	if err := c.Bind(&req); err != nil {
-		h.logger.WarnContext(
-			ctx, "failed to bind request",
-			"op", op, "error", err)
-
-		if errors.Is(err, io.EOF) {
-			return echo.NewHTTPError(http.StatusBadRequest, "request body is empty")
-		}
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request format")
+	if err := bindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	if err := c.Validate(&req); err != nil {
-		h.logger.WarnContext(
-			ctx, "validation failed",
-			"op", op, "error", err)
-
-		var validationErrs validator.ValidationErrors
-		if errors.As(err, &validationErrs) {
-			return echo.NewHTTPError(http.StatusUnprocessableEntity, formatValidationError(err))
-		}
-		return echo.NewHTTPError(http.StatusBadRequest, "validation error")
+	if req.Limit == 0 {
+		req.Limit = defaultPageLimit
 	}
 
-	// Устанавливаем разумные дефолты и жесткие верхние границы
-	if req.Limit <= 0 {
-		req.Limit = 20
-	} else if req.Limit > 100 { // Защита от выгрузки всей БД в RAM
-		req.Limit = 100
-	}
-
-	// Якорь AnchorID передаем как есть даже пустой, репозиторий сам с ним разберется
-	messages, hasMore, err := h.usecase.ListMessages(ctx, req.ChatID, req.AnchorID, req.Limit)
+	messages, hasMore, err := h.usecase.ListMessages(
+		ctx, mddlwr.UserID(c), req.ChatID, req.AnchorID, req.Limit)
 	if err != nil {
-		h.logger.ErrorContext(ctx, "failed to process list messages request",
-			"op", op,
-			"chatID", req.ChatID,
-			"error", err,
-		)
-
-		if errors.Is(err, domainComm.ErrDatabaseTimeout) {
-			return echo.NewHTTPError(
-				http.StatusServiceUnavailable,
-				"service temporarily unavailable")
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error")
+		return h.mapError(ctx, "Handler.ListMessages", err)
 	}
 
-	return c.JSON(http.StatusOK, ListMessagesResponse{
-		Messages: messages,
-		HasMore:  hasMore,
-	})
+	return c.JSON(http.StatusOK, newMessagesResponse(messages, hasMore))
 }
 
-// delete /messages?chat_id=xxx&message_id=xxx
+// DeleteMessages удаляет сообщения пользователя.
+// DELETE /api/v1/messages?chat_id=xxx&message_ids=xxx&message_ids=yyy
 func (h *Handler) DeleteMessages(c echo.Context) error {
-	const op = "Handler.DeleteMessages"
 	ctx := c.Request().Context()
-
-	userID := c.Get("user_id").(string)
 
 	var req DeleteMessagesRequest
-	if err := c.Bind(&req); err != nil {
-		h.logger.WarnContext(
-			ctx, "failed to bind delete request",
-			"op", op, "error", err)
-
-		if errors.Is(err, io.EOF) {
-			return echo.NewHTTPError(http.StatusBadRequest, "request body is empty")
-		}
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request format")
+	if err := bindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	if err := c.Validate(&req); err != nil {
-		h.logger.WarnContext(
-			ctx, "validation failed for delete request",
-			"op", op, "error", err)
-
-		var validationErrs validator.ValidationErrors
-		if errors.As(err, &validationErrs) {
-			return echo.NewHTTPError(http.StatusUnprocessableEntity, formatValidationError(err))
-		}
-		return echo.NewHTTPError(http.StatusBadRequest, "validation error")
-	}
-
-	if len(req.MessageIDs) == 0 {
-		//Возвращаем 204 No Content для идемпотентности
-		return c.NoContent(http.StatusNoContent)
-	}
-
-	if len(req.MessageIDs) > 100 {
-		return echo.NewHTTPError(http.StatusBadRequest, "cannot delete more than 100 messages at once")
-	}
-
-	err := h.usecase.DeleteMessages(ctx, userID, req.ChatID, req.MessageIDs)
+	err := h.usecase.DeleteMessages(ctx, mddlwr.UserID(c), req.ChatID, req.MessageIDs)
 	if err != nil {
-		h.logger.ErrorContext(ctx, "failed to process delete messages request",
-			"op", op,
-			"userID", userID,
-			"chatID", req.ChatID,
-			"error", err,
-		)
-
-		// Маппинг доменных ошибок в HTTP статусы
-		if errors.Is(err, domainComm.ErrAccessDenied) {
-			return echo.NewHTTPError(http.StatusForbidden, "you can only delete your own messages")
-		}
-		if errors.Is(err, domainComm.ErrDatabaseTimeout) {
-			return echo.NewHTTPError(http.StatusServiceUnavailable, "service temporarily unavailable")
-		}
-
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error")
+		return h.mapError(ctx, "Handler.DeleteMessages", err)
 	}
 
 	return c.NoContent(http.StatusNoContent)
 }
 
-// put /messages?chat_id=xxx&message_id=xxx
+// UpdateMessage меняет текст сообщения.
+// PUT /api/v1/messages/:message_id
 func (h *Handler) UpdateMessage(c echo.Context) error {
-	const op = "Handler.UpdateMessage"
 	ctx := c.Request().Context()
 
-	userID, ok := c.Get("user_id").(string)
-	if !ok || userID == "" {
-		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized access")
-	}
-
 	var req UpdateMessageRequest
-
-	if err := c.Bind(&req); err != nil {
-		h.logger.WarnContext(ctx, "failed to bind update request",
-			"op", op, "error", err)
-
-		if errors.Is(err, io.EOF) {
-			return echo.NewHTTPError(http.StatusBadRequest, "request body is empty")
-		}
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid request format")
+	if err := bindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	if err := c.Validate(&req); err != nil {
-		h.logger.WarnContext(ctx, "validation failed for update request",
-			"op", op, "error", err)
-
-		var validationErrs validator.ValidationErrors
-		if errors.As(err, &validationErrs) {
-			return echo.NewHTTPError(http.StatusUnprocessableEntity, formatValidationError(err))
-		}
-		return echo.NewHTTPError(http.StatusBadRequest, "validation error")
-	}
-
-	err := h.usecase.UpdateMessage(ctx, userID, req.ChatID, req.MessageID, req.Content)
+	err := h.usecase.UpdateMessage(
+		ctx, mddlwr.UserID(c), req.ChatID, req.MessageID, req.Content)
 	if err != nil {
-		h.logger.ErrorContext(ctx, "failed to update message",
-			"op", op,
-			"userID", userID,
-			"messageID", req.MessageID,
-			"error", err,
-		)
-
-		if errors.Is(err, domainComm.ErrNotFound) {
-			return echo.NewHTTPError(http.StatusNotFound, "message not found or you do not have permission to edit it")
-		}
-		if errors.Is(err, domainComm.ErrInvalidInput) {
-			return echo.NewHTTPError(http.StatusBadRequest, "message content cannot be empty")
-		}
-		if errors.Is(err, domainComm.ErrDatabaseTimeout) {
-			return echo.NewHTTPError(http.StatusServiceUnavailable, "service temporarily unavailable")
-		}
-
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error")
+		return h.mapError(ctx, "Handler.UpdateMessage", err)
 	}
 
 	return c.NoContent(http.StatusNoContent)
 }
 
-// get messages/search?chat_id=xxx&text=xxx
+// SearchMessages ищет текстовые сообщения в чате.
+// GET /api/v1/messages/search?chat_id=xxx&text=xxx&anchor=xxx&limit=xxx
 func (h *Handler) SearchMessages(c echo.Context) error {
-	const op = "Handler.SearchMessages"
 	ctx := c.Request().Context()
 
 	var req SearchMessagesRequest
-	if err := c.Bind(&req); err != nil {
-		h.logger.WarnContext(
-			ctx, "failed to bind search request",
-			"op", op, "error", err)
+	if err := bindAndValidate(c, &req); err != nil {
+		return err
+	}
 
-		if errors.Is(err, io.EOF) {
-			return echo.NewHTTPError(http.StatusBadRequest, "request body is empty")
-		}
+	if req.Limit == 0 {
+		req.Limit = defaultPageLimit
+	}
+
+	messages, hasMore, err := h.usecase.SearchMessages(
+		ctx, mddlwr.UserID(c), req.ChatID, req.Text, req.AnchorID, req.Limit)
+	if err != nil {
+		return h.mapError(ctx, "Handler.SearchMessages", err)
+	}
+
+	return c.JSON(http.StatusOK, newMessagesResponse(messages, hasMore))
+}
+
+func newMessagesResponse(messages []domain.Message, hasMore bool) MessagesResponse {
+	if messages == nil {
+		// чтобы в JSON был пустой массив, а не null
+		messages = []domain.Message{}
+	}
+	return MessagesResponse{Messages: messages, HasMore: hasMore}
+}
+
+// bindAndValidate разбирает запрос в DTO и валидирует его.
+// Возвращает готовую HTTP ошибку: 400 при некорректном формате, 422 при провале валидации.
+func bindAndValidate(c echo.Context, req any) error {
+	if err := c.Bind(req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request format")
 	}
 
-	if err := c.Validate(&req); err != nil {
-		h.logger.WarnContext(
-			ctx, "validation failed for search request",
-			"op", op, "error", err)
-
+	if err := c.Validate(req); err != nil {
 		var validationErrs validator.ValidationErrors
 		if errors.As(err, &validationErrs) {
-			return echo.NewHTTPError(http.StatusUnprocessableEntity, formatValidationError(err))
+			return echo.NewHTTPError(
+				http.StatusUnprocessableEntity, formatValidationErrors(validationErrs))
 		}
 		return echo.NewHTTPError(http.StatusBadRequest, "validation error")
 	}
 
-	//  Жесткие лимиты
-	// так как здесь поиск тяжелее обычного List
-	if req.Limit <= 0 {
-		req.Limit = 20
-	} else if req.Limit > 50 {
-		// Для $text поиска лимит 50 - это  максимум так как БД начнет страдать
-		req.Limit = 50
-	}
-
-	// Вызываем юзкейс
-	messages, hasMore, err := h.usecase.SearchMessages(
-		ctx,
-		req.ChatID,
-		req.Text,
-		req.AnchorID,
-		req.Limit)
-	if err != nil {
-		// Логгируем на границе системы с полным стеком
-		h.logger.ErrorContext(ctx, "failed to search messages",
-			"op", op,
-			"chatID", req.ChatID,
-			"error", err,
-		)
-
-		// Переводим доменные ошибки в понятные HTTP статусы
-		if errors.Is(err, domainComm.ErrDatabaseTimeout) {
-			return echo.NewHTTPError(http.StatusServiceUnavailable, "search service is temporarily overloaded")
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error")
-	}
-
-	// Возвращаем результат
-	return c.JSON(http.StatusOK, SearchMessagesResponse{
-		Messages: messages,
-		HasMore:  hasMore, // Фронтенд теперь знает, нужно ли показывать кнопку "Показать еще"
-	})
+	return nil
 }
 
-// функция помошник для форматирования ошибок валидации
-//
-// в более читаемый формат для клиента
-func formatValidationError(err error) map[string]string {
-	erro := make(map[string]string)
-	var vErrs validator.ValidationErrors
-
-	if errors.As(err, &vErrs) {
-		for _, f := range vErrs {
-			erro[f.Field()] = fmt.Sprintf("failed on the '%s' tag", f.Tag())
-		}
-	} else {
-		erro["error"] = err.Error()
+// formatValidationErrors переводит ошибки валидации в формат поле - причина
+func formatValidationErrors(errs validator.ValidationErrors) map[string]string {
+	details := make(map[string]string, len(errs))
+	for _, f := range errs {
+		details[f.Field()] = fmt.Sprintf("failed on the '%s' rule", f.Tag())
 	}
-	return erro
+	return details
+}
+
+// mapError переводит доменные ошибки в HTTP статусы
+func (h *Handler) mapError(ctx context.Context, op string, err error) error {
+	switch {
+	case errors.Is(err, domainComm.ErrInvalidInput):
+		return echo.NewHTTPError(http.StatusBadRequest, "message content is empty or too long")
+	case errors.Is(err, domainComm.ErrAccessDenied):
+		return echo.NewHTTPError(http.StatusForbidden, "you are not a member of this chat")
+	case errors.Is(err, domainChat.ErrChatNotFound):
+		return echo.NewHTTPError(http.StatusNotFound, "chat not found")
+	case errors.Is(err, domainComm.ErrNotFound):
+		return echo.NewHTTPError(http.StatusNotFound, "message not found or it is not yours")
+	case errors.Is(err, domainComm.ErrDatabaseTimeout):
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "service temporarily unavailable")
+	}
+
+	// Неожиданная ошибка: логируем на границе системы, клиенту детали не отдаем
+	h.logger.ErrorContext(ctx, "request failed", "op", op, "error", err)
+	return echo.NewHTTPError(http.StatusInternalServerError, "internal server error")
 }

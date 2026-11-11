@@ -4,18 +4,13 @@ import (
 	"errors"
 	"log/slog"
 
-	config "main/internal/configs"
-	handler "main/internal/transport/http"
-
-	cache "main/internal/cache"
-
-	uc "main/internal/usecase"
+	msgHandlers "main/internal/transport/http/message_handlers"
+	mddlwr "main/internal/transport/middleware"
 	errHandler "main/pkg/error_handler"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	"github.com/redis/go-redis/v9"
 )
 
 type CustomValidator struct {
@@ -26,18 +21,16 @@ func (cv *CustomValidator) Validate(i interface{}) error {
 	return cv.validator.Struct(i)
 }
 
-func Run(
-	cfg config.Config,
+// NewServer собирает Echo: middleware, обработчик ошибок и маршруты.
+// Сам сервер не запускает.
+func NewServer(
 	logger *slog.Logger,
-	jwt JWTManager,
-	usecase *uc.Usecase,
-	redisClient *redis.Client) *echo.Echo {
-
-	//инициализация in memory cache
-	memoryCache := cache.NewCache[int, int](cfg.InMemoryCache, logger)
-
+	handlerMsg *msgHandlers.Handler,
+	verifier mddlwr.TokenVerifier,
+) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
+	e.HidePort = true
 	e.Validator = &CustomValidator{validator: validator.New()}
 
 	// custom error handler
@@ -46,22 +39,28 @@ func Run(
 	}
 
 	e.Use(middleware.Recover())
+	e.Use(middleware.RequestID())
+	e.Use(mddlwr.RequestIDToContextMiddleware())
 	e.Use(middleware.CORS())
 	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
-		LogURI:      true,
+		// Логируем путь без query-строки: в ней может быть токен WebSocket-подключения
+		LogURIPath:  true,
 		LogStatus:   true,
 		LogLatency:  true, // log the time taken to process the request
 		LogMethod:   true,
 		LogError:    true,
-		LogRemoteIP: true, // log the client's IP address for better traceability in future, jusst in case
+		LogRemoteIP: true, // log the client's IP address for better traceability
 		HandleError: true,
 		LogValuesFunc: func(c echo.Context, v middleware.RequestLoggerValues) error {
+			// request_id добавит логгер из контекста запроса
+			ctx := c.Request().Context()
+
 			attrs := []any{
-				slog.String("request_id", c.Response().Header().Get("X-Request-ID")),
 				slog.String("method", v.Method),
-				slog.String("uri", v.URI),
+				slog.String("path", v.URIPath),
 				slog.Int("status", v.Status),
 				slog.Duration("latency", v.Latency),
+				slog.String("remote_ip", v.RemoteIP),
 			}
 
 			if v.Error != nil {
@@ -75,18 +74,17 @@ func Run(
 
 			switch {
 			case v.Status >= 500:
-				logger.Error("HTTP_SERVER_ERROR", attrs...)
+				logger.ErrorContext(ctx, "HTTP_SERVER_ERROR", attrs...)
 			case v.Status >= 400:
-				logger.Warn("HTTP_CLIENT_ERROR", attrs...)
+				logger.WarnContext(ctx, "HTTP_CLIENT_ERROR", attrs...)
 			default:
-				logger.Info("HTTP_OK", attrs...)
+				logger.InfoContext(ctx, "HTTP_OK", attrs...)
 			}
 			return nil
 		},
 	}))
 
-	handler := handler.NewHandler(e, logger, usecase, redisClient, cfg)
-	MapRoutes(e, handler, jwt)
+	MapRoutes(e, handlerMsg, verifier)
 
 	return e
 }
